@@ -1,0 +1,10 @@
+<?php
+
+return [
+    'title' => 'نظرة عامة',
+    'total' => 'إجمالي الطلاب',
+    'active' => 'فعال',
+    'due_soon' => 'غدًا / اليوم',
+    'expired' => 'منتهي',
+    'go_notifications' => 'عرض التنبيهات',
+];

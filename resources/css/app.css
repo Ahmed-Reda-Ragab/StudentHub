@@ -1,0 +1,49 @@
+@import 'tailwindcss';
+
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+@source '../../app/Enums/*.php';
+
+@theme {
+    --font-sans: var(--font-cairo, 'Cairo'), ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji',
+        'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+}
+
+[x-cloak] {
+    display: none !important;
+}
+
+@layer base {
+    html {
+        -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+        @apply bg-slate-50 text-slate-800 antialiased;
+    }
+
+    /* Numbers (phone, code, dates) always LTR and easy to copy. */
+    .ltr-nums {
+        direction: ltr;
+        unicode-bidi: isolate;
+        font-variant-numeric: tabular-nums;
+    }
+
+    :focus-visible {
+        @apply outline-2 outline-offset-2 outline-indigo-600;
+    }
+}
+
+@layer components {
+    .card {
+        @apply rounded-xl bg-white shadow-sm ring-1 ring-slate-200/70;
+    }
+
+    .form-input {
+        @apply block min-h-11 w-full rounded-lg border-0 bg-white px-3 py-2 text-slate-900 shadow-xs ring-1 ring-slate-300 ring-inset placeholder:text-slate-400 focus:ring-2 focus:ring-indigo-600 focus:outline-none;
+    }
+
+    .form-input[aria-invalid='true'] {
+        @apply ring-red-400 focus:ring-red-500;
+    }
+}

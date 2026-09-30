@@ -58,7 +58,7 @@ class WhatsAppLinkBuilder
         return strtr($template, [
             '{name}' => $student->name,
             '{code}' => $student->code,
-            '{section}' => $student->section,
+            '{section}' => $student->section?->label() ?? '',
             '{next_renewal_date}' => $student->next_renewal_date->format('d/m/Y'),
             '{days_left}' => (string) max(0, $student->daysUntilRenewal()),
         ]);

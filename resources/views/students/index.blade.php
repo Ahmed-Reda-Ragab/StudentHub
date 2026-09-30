@@ -118,7 +118,7 @@
                                 </td>
                                 <td class="px-4 py-3"><span class="ltr-nums">{{ $student->code }}</span></td>
                                 <td class="px-4 py-3"><span class="ltr-nums">{{ $student->phone }}</span></td>
-                                <td class="px-4 py-3 text-slate-600">{{ $student->section }}</td>
+                                <td class="px-4 py-3 text-slate-600">{{ $student->section?->label() ?? __('students.section_missing') }}</td>
                                 <td class="px-4 py-3"><span class="ltr-nums">{{ $student->last_subscription_date->format('d/m/Y') }}</span></td>
                                 <td class="px-4 py-3 font-semibold"><span class="ltr-nums">{{ $student->next_renewal_date->format('d/m/Y') }}</span></td>
                                 <td class="px-4 py-3"><x-status-badge :status="$rowStatus" /></td>
@@ -141,7 +141,7 @@
                                         {{ $student->name }}
                                     </p>
                                     <p class="mt-0.5 text-sm text-slate-500">
-                                        {{ __('students.fields.code') }} <span class="ltr-nums">{{ $student->code }}</span> · {{ $student->section }}
+                                        {{ __('students.fields.code') }} <span class="ltr-nums">{{ $student->code }}</span> · {{ $student->section?->label() ?? __('students.section_missing') }}
                                     </p>
                                 </div>
                                 <x-status-badge :status="$rowStatus" />

@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Enums\Section;
 use App\Http\Requests\Concerns\ValidatesPricing;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
@@ -50,7 +51,7 @@ class StoreStudentRequest extends FormRequest
         return [
             'name' => ['required', 'string', 'max:255'],
             'phone' => ['required', 'string', 'max:20', 'regex:/^\+?[0-9\-()]{7,20}$/'],
-            'section' => ['required', 'string', 'max:100'],
+            'section' => ['required', Rule::enum(Section::class)],
             'notes' => ['nullable', 'string', 'max:2000'],
         ];
     }

@@ -71,7 +71,7 @@
                 </div>
                 <div>
                     <dt class="text-sm text-slate-500">{{ __('students.fields.section') }}</dt>
-                    <dd class="mt-1 font-semibold">{{ $student->section }}</dd>
+                    <dd class="mt-1 font-semibold">{{ $student->section?->label() ?? __('students.section_missing') }}</dd>
                 </div>
                 @if ($student->notes)
                     <div class="sm:col-span-3">

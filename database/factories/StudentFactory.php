@@ -2,6 +2,7 @@
 
 namespace Database\Factories;
 
+use App\Enums\Section;
 use App\Enums\SubscriptionType;
 use App\Models\Student;
 use App\Models\User;
@@ -27,7 +28,7 @@ class StudentFactory extends Factory
             'name' => fake()->name(),
             'phone' => '01'.fake()->randomElement(['0', '1', '2', '5']).fake()->numerify('########'),
             'code' => fake()->unique()->numerify('######'),
-            'section' => fake()->randomElement(['أولى ثانوي', 'تانية ثانوي', 'تالتة ثانوي']),
+            'section' => fake()->randomElement(Section::cases()),
             'notes' => null,
             'first_subscription_date' => $start,
             'last_subscription_date' => $start,

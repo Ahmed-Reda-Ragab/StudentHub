@@ -2,6 +2,7 @@
 
 namespace Database\Seeders;
 
+use App\Enums\Section;
 use App\Models\User;
 use App\Services\SubscriptionService;
 use App\Support\SubscriptionPeriod;
@@ -15,8 +16,6 @@ use Illuminate\Database\Seeder;
  */
 class DemoSeeder extends Seeder
 {
-    private const SECTIONS = ['أولى ثانوي', 'تانية ثانوي', 'تالتة ثانوي'];
-
     /**
      * Days from today to each student's next renewal: expired (<0), today (0), tomorrow (1), active (>1).
      */
@@ -46,7 +45,7 @@ class DemoSeeder extends Seeder
                 'name' => fake('ar_EG')->name(),
                 'phone' => '01'.fake()->randomElement(['0', '1', '2', '5']).fake()->numerify('########'),
                 'code' => (string) (100001 + $i),
-                'section' => self::SECTIONS[$i % count(self::SECTIONS)],
+                'section' => Section::cases()[$i % count(Section::cases())]->value,
                 'notes' => $i % 5 === 0 ? 'ملتزم بالحضور' : null,
                 'subscribed_on' => $firstDate,
             ]);

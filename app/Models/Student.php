@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Casts\DateOnly;
+use App\Enums\Section;
 use App\Enums\SubscriptionStatus;
 use App\Models\Concerns\BelongsToUser;
 use App\Support\WhatsApp\WhatsAppLinkBuilder;
@@ -28,7 +29,7 @@ use Illuminate\Database\Eloquent\SoftDeletes;
  * @property string $name
  * @property string $phone
  * @property string $code
- * @property string $section
+ * @property ?Section $section NULL = not chosen yet (legacy free-text rows)
  * @property ?string $notes
  * @property CarbonImmutable $first_subscription_date
  * @property CarbonImmutable $last_subscription_date
@@ -44,6 +45,7 @@ class Student extends Model
     {
         return [
             'number' => 'integer',
+            'section' => Section::class,
             'first_subscription_date' => DateOnly::class,
             'last_subscription_date' => DateOnly::class,
             'next_renewal_date' => DateOnly::class,

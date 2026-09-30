@@ -8,7 +8,7 @@ return [
     'short' => 'واتساب',
 
     'templates' => [
-        'upcoming' => "أهلاً {name} 👋\nبنفكّرك إن اشتراكك (كود {code}) بيتجدد بتاريخ {next_renewal_date}.\nبرجاء التجديد لضمان استمرار الحضور. شكرًا 🌷",
-        'expired' => "أهلاً {name} 👋\nاشتراكك (كود {code}) انتهى بتاريخ {next_renewal_date}، برجاء التجديد لضمان استمرار الحضور. شكرًا 🌷",
+        // One message for both "about to end" and "already ended".
+        'reminder' => "اهلا {name} 👋\nمرحبا. نحب نذكرك أن اشتراكك في منصة ثناويكا انتهى أو متبقي على انتهائه ساعات قليلة ⏳\n\nتحب تجديد الاشتراك.",
     ],
 ];

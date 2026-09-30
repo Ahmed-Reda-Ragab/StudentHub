@@ -30,6 +30,10 @@
                     <dd class="font-semibold ltr-nums">{{ $student->last_subscription_date->format('d/m/Y') }}</dd>
                 </div>
                 <div class="flex justify-between gap-4">
+                    <dt class="text-slate-500">{{ __('students.period_ends') }}</dt>
+                    <dd class="font-semibold ltr-nums">{{ $student->next_renewal_date->subDay()->format('d/m/Y') }}</dd>
+                </div>
+                <div class="flex justify-between gap-4">
                     <dt class="text-slate-500">{{ __('students.fields.next_renewal_date') }}</dt>
                     <dd class="font-bold text-slate-900 ltr-nums">{{ $student->next_renewal_date->format('d/m/Y') }}</dd>
                 </div>

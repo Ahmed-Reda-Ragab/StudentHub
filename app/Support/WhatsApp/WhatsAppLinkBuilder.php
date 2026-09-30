@@ -2,7 +2,6 @@
 
 namespace App\Support\WhatsApp;
 
-use App\Enums\SubscriptionStatus;
 use App\Models\Student;
 
 /**
@@ -48,7 +47,7 @@ class WhatsAppLinkBuilder
 
     public function forStudent(Student $student, ?string $template = null): string
     {
-        return $this->url($student->phone, $this->render($template ?? $this->defaultTemplateFor($student), $student));
+        return $this->url($student->phone, $this->render($template ?? __('whatsapp.templates.reminder'), $student));
     }
 
     /**
@@ -63,12 +62,5 @@ class WhatsAppLinkBuilder
             '{next_renewal_date}' => $student->next_renewal_date->format('d/m/Y'),
             '{days_left}' => (string) max(0, $student->daysUntilRenewal()),
         ]);
-    }
-
-    private function defaultTemplateFor(Student $student): string
-    {
-        return $student->status() === SubscriptionStatus::Expired
-            ? __('whatsapp.templates.expired')
-            : __('whatsapp.templates.upcoming');
     }
 }

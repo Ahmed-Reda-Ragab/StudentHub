@@ -32,7 +32,7 @@ class StudentFactory extends Factory
             'first_subscription_date' => $start,
             'last_subscription_date' => $start,
             'next_renewal_date' => fn (array $attributes) => app(SubscriptionPeriod::class)
-                ->endsOn(CarbonImmutable::parse($attributes['last_subscription_date'])),
+                ->nextRenewal(CarbonImmutable::parse($attributes['last_subscription_date'])),
         ];
     }
 
@@ -62,13 +62,16 @@ class StudentFactory extends Factory
     }
 
     /**
-     * Next renewal lands exactly on the given date.
+     * Next renewal lands exactly on the given date. Set explicitly because month math
+     * isn't always invertible (e.g. nothing + 1 month lands on 31/10).
      */
     public function renewsOn(string|CarbonImmutable $date): static
     {
-        $days = app(SubscriptionPeriod::class)->days();
+        $date = CarbonImmutable::parse($date);
+        $months = app(SubscriptionPeriod::class)->months();
 
-        return $this->subscribedOn(CarbonImmutable::parse($date)->subDays($days));
+        return $this->subscribedOn($date->subMonthsNoOverflow($months))
+            ->state(['next_renewal_date' => $date]);
     }
 
     public function configure(): static
@@ -78,7 +81,7 @@ class StudentFactory extends Factory
                 'user_id' => $student->user_id,
                 'type' => SubscriptionType::Initial,
                 'start_date' => $student->last_subscription_date,
-                'ends_on' => $student->next_renewal_date,
+                'ends_on' => $student->next_renewal_date->subDay(),
                 'price' => config('subscriptions.pricing.price'),
                 'commission' => config('subscriptions.pricing.commission'),
             ]);

@@ -66,11 +66,7 @@
                 required
                 id="renewal-date"
             >
-                <p class="mt-2 flex items-center gap-1.5 text-sm text-indigo-700" x-show="$nextRenewal(date)">
-                    <x-icon name="calendar" class="size-4" />
-                    {{ __('students.preview') }}
-                    <strong class="ltr-nums" x-text="$nextRenewal(date)"></strong>
-                </p>
+                <x-period-preview />
                 <p class="mt-1 text-xs text-slate-500 ltr-nums" x-show="last" x-text="@js(__('subscriptions.renew.last', ['date' => '__D__'])).replace('__D__', last)"></p>
             </x-input>
 

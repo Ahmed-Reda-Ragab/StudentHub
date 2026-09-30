@@ -12,29 +12,27 @@ class WhatsAppLinkTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_student_link_uses_international_number_and_upcoming_template(): void
+    public function test_student_link_uses_international_number_and_reminder_template(): void
     {
-        $this->travelTo(CarbonImmutable::parse('2026-10-30 10:00', 'Africa/Cairo'));
-
-        $student = Student::factory()->for(User::factory())->renewsOn('2026-10-31')
-            ->create(['name' => 'أحمد', 'code' => '123456', 'phone' => '01012345678']);
+        $student = Student::factory()->for(User::factory())->create(['name' => 'أحمد', 'phone' => '01012345678']);
 
         $url = $student->whatsappUrl();
         $text = rawurldecode(parse_url($url, PHP_URL_QUERY));
 
         $this->assertStringStartsWith('https://wa.me/201012345678?text=', $url);
-        $this->assertStringContainsString('أهلاً أحمد', $text);
-        $this->assertStringContainsString('كود 123456', $text);
-        $this->assertStringContainsString('31/10/2026', $text);
+        $this->assertSame(
+            "text=اهلا أحمد 👋\nمرحبا. نحب نذكرك أن اشتراكك في منصة ثناويكا انتهى أو متبقي على انتهائه ساعات قليلة ⏳\n\nتحب تجديد الاشتراك.",
+            $text,
+        );
     }
 
-    public function test_expired_students_get_the_expired_template(): void
+    public function test_expired_students_get_the_same_reminder(): void
     {
         $this->travelTo(CarbonImmutable::parse('2026-11-05 10:00', 'Africa/Cairo'));
 
         $student = Student::factory()->for(User::factory())->renewsOn('2026-10-31')->create();
 
-        $this->assertStringContainsString('انتهى', rawurldecode($student->whatsappUrl()));
+        $this->assertStringContainsString('انتهى أو متبقي على انتهائه', rawurldecode($student->whatsappUrl()));
     }
 
     public function test_student_page_links_to_whatsapp_in_new_tab(): void

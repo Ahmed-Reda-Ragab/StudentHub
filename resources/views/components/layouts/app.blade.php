@@ -4,12 +4,13 @@
     $nav = [
         ['route' => 'students.index', 'match' => 'students.*', 'icon' => 'users', 'label' => __('app.nav.students')],
         ['route' => 'notifications.index', 'match' => 'notifications.*', 'icon' => 'bell', 'label' => __('app.nav.notifications')],
+        ['route' => 'reports.index', 'match' => 'reports.*', 'icon' => 'banknotes', 'label' => __('app.nav.reports')],
         ['route' => 'dashboard', 'match' => 'dashboard', 'icon' => 'chart-bar', 'label' => __('app.nav.dashboard')],
     ];
 @endphp
 
 <!DOCTYPE html>
-<html lang="{{ str_replace('_', '-', app()->getLocale()) }}" dir="rtl" data-period-days="{{ config('subscriptions.period_days') }}">
+<html lang="{{ str_replace('_', '-', app()->getLocale()) }}" dir="rtl" data-period-months="{{ config('subscriptions.period_months') }}">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -86,7 +87,7 @@
 
     {{-- Mobile bottom navigation --}}
     <nav class="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] md:hidden" aria-label="{{ __('app.nav.menu') }}">
-        <div class="grid grid-cols-3">
+        <div class="grid grid-cols-4">
             @foreach ($nav as $item)
                 <a
                     href="{{ route($item['route']) }}"

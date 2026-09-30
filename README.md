@@ -1,6 +1,6 @@
 # Students Subscriptions
 
-Multi-user system for managing students and their 30-day subscriptions (Arabic, RTL, mobile-first).
+Multi-user system for managing students and their monthly subscriptions (Arabic, RTL, mobile-first).
 Laravel 13 · Blade · Tailwind v4 · Alpine.js · PHPUnit. No API, no SPA, no cron/queue.
 
 ## Quick start
@@ -29,12 +29,13 @@ app/
 │   └── User.php
 ├── Services/
 │   ├── SubscriptionService.php         # ONLY writer of the ledger + denormalized dates (addStudent, renew)
-│   └── NotificationSyncService.php     # once-a-day digest on first screen visit (atomic claim)
+│   ├── NotificationSyncService.php     # once-a-day digest on first screen visit (atomic claim)
+│   └── RevenueReportService.php        # price/commission totals, per-day and entries for a from–to range
 ├── Support/
-│   ├── SubscriptionPeriod.php          # pure date math (period_days)
+│   ├── SubscriptionPeriod.php          # calendar-month math: ends the day before the same day next month
 │   └── WhatsApp/WhatsAppLinkBuilder.php# wa.me links + templates (swappable for a real API later)
 ├── Http/
-│   ├── Controllers/{Student,Renewal,Notification,Dashboard}Controller.php, Auth/*
+│   ├── Controllers/{Student,Renewal,Notification,Report,Dashboard}Controller.php, Auth/*
 │   ├── Requests/{Store,Update}StudentRequest, RenewStudentRequest, Auth/*
 │   └── Middleware/
 │       ├── PreventDuplicateSubmissions.php  # idempotency via one-off _submission_token
@@ -42,7 +43,7 @@ app/
 ├── Notifications/RenewalDueNotification.php
 ├── Policies/StudentPolicy.php          # defense in depth on top of the global scope
 └── View/Composers/NavigationComposer.php   # bell counter
-config/subscriptions.php                # period_days, per_page, whatsapp country code, token TTL
+config/subscriptions.php                # period_months, default price/commission, per_page, whatsapp country code, token TTL
 lang/ar/*                               # every UI string & validation message
 resources/views/
 ├── components/                         # x-form (loader+idempotency), x-button, x-input, x-modal,
@@ -65,4 +66,4 @@ resources/views/
 
 ## Roadmap (spec phases 2–3)
 
-Reports + CSV export, editable WhatsApp templates (`message_templates`), amount per renewal (column already exists), WhatsApp Cloud API.
+CSV export, editable WhatsApp templates (`message_templates`), WhatsApp Cloud API.

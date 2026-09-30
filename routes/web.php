@@ -3,6 +3,7 @@
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\RenewalController;
+use App\Http\Controllers\ReportController;
 use App\Http\Controllers\StudentController;
 use Illuminate\Support\Facades\Route;
 
@@ -24,6 +25,8 @@ Route::middleware('auth')->group(function () {
         ->name('students.renewals.store');
 
     Route::get('/notifications', [NotificationController::class, 'index'])->name('notifications.index');
+
+    Route::get('/reports', [ReportController::class, 'index'])->name('reports.index');
 });
 
 require __DIR__.'/auth.php';

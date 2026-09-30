@@ -12,11 +12,7 @@
     @unless ($student)
         <div x-data="{ date: @js(old('subscribed_on', today()->toDateString())) }">
             <x-input name="subscribed_on" type="date" :label="__('students.fields.subscribed_on')" x-model="date" required>
-                <p class="mt-2 flex items-center gap-1.5 text-sm text-indigo-700" x-show="$nextRenewal(date)" aria-live="polite">
-                    <x-icon name="calendar" class="size-4" />
-                    {{ __('students.preview') }}
-                    <strong class="ltr-nums" x-text="$nextRenewal(date)"></strong>
-                </p>
+                <x-period-preview />
             </x-input>
         </div>
 

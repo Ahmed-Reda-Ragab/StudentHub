@@ -3,9 +3,11 @@
 return [
 
     /*
-    | Length of one subscription period. next_renewal_date = last_subscription_date + period_days.
+    | Length of one subscription period in calendar months.
+    | next_renewal_date = last_subscription_date + N months (same day of month, clamped to month end);
+    | the period ends (last covered day) the day before the next renewal.
     */
-    'period_days' => (int) env('SUBSCRIPTION_PERIOD_DAYS', 30),
+    'period_months' => (int) env('SUBSCRIPTION_PERIOD_MONTHS', 1),
 
     /*
     | Default price and commission (profit) pre-filled for every subscription/renewal.

@@ -30,11 +30,12 @@ class SubscriptionService
     public function addStudent(User $user, array $data): Student
     {
         $startDate = CarbonImmutable::parse($data['subscribed_on'])->startOfDay();
-        $nextRenewal = $this->period->endsOn($startDate);
+        $endsOn = $this->period->endsOn($startDate);
+        $nextRenewal = $this->period->nextRenewal($startDate);
         $pricing = $this->pricing($data['price'] ?? null, $data['commission'] ?? null);
 
         try {
-            return DB::transaction(function () use ($user, $data, $startDate, $nextRenewal, $pricing) {
+            return DB::transaction(function () use ($user, $data, $startDate, $endsOn, $nextRenewal, $pricing) {
                 // Lock the owner row so concurrent inserts for the same user get sequential numbers.
                 User::query()->whereKey($user->getKey())->lockForUpdate()->first();
 
@@ -51,7 +52,7 @@ class SubscriptionService
                     'user_id' => $user->getKey(),
                     'type' => SubscriptionType::Initial,
                     'start_date' => $startDate,
-                    'ends_on' => $nextRenewal,
+                    'ends_on' => $endsOn,
                     ...$pricing,
                 ]);
 
@@ -75,11 +76,12 @@ class SubscriptionService
         ?string $note = null,
     ): Subscription {
         $startDate = CarbonImmutable::parse($date->toDateString());
-        $nextRenewal = $this->period->endsOn($startDate);
+        $endsOn = $this->period->endsOn($startDate);
+        $nextRenewal = $this->period->nextRenewal($startDate);
         $pricing = $this->pricing($price, $commission);
 
         try {
-            $subscription = DB::transaction(function () use ($student, $startDate, $nextRenewal, $pricing, $note) {
+            $subscription = DB::transaction(function () use ($student, $startDate, $endsOn, $nextRenewal, $pricing, $note) {
                 /** @var Student $locked */
                 $locked = Student::query()
                     ->withoutGlobalScopes()
@@ -93,7 +95,7 @@ class SubscriptionService
                     'user_id' => $locked->user_id,
                     'type' => SubscriptionType::Renewal,
                     'start_date' => $startDate,
-                    'ends_on' => $nextRenewal,
+                    'ends_on' => $endsOn,
                     ...$pricing,
                     'note' => $note,
                 ]);

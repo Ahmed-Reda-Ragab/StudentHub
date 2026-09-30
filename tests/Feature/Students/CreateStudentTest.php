@@ -49,14 +49,16 @@ class CreateStudentTest extends TestCase
         $this->assertSame('01012345678', $student->phone);
         $this->assertSame('2026-10-01', $student->first_subscription_date->toDateString());
         $this->assertSame('2026-10-01', $student->last_subscription_date->toDateString());
-        $this->assertSame('2026-10-31', $student->next_renewal_date->toDateString());
+        $this->assertSame('2026-11-01', $student->next_renewal_date->toDateString());
 
+        // Covered until the day before the next renewal.
         $subscription = $student->subscriptions()->sole();
         $this->assertSame(SubscriptionType::Initial, $subscription->type);
         $this->assertSame('2026-10-31', $subscription->ends_on->toDateString());
 
-        // Acceptance: the student page shows 31/10/2026
-        $this->actingAs($user)->get(route('students.show', $student))->assertSee('31/10/2026');
+        $this->actingAs($user)->get(route('students.show', $student))
+            ->assertSee('31/10/2026')
+            ->assertSee('01/11/2026');
     }
 
     public function test_numbers_are_sequential_per_user_and_independent_between_users(): void
@@ -131,6 +133,6 @@ class CreateStudentTest extends TestCase
 
         $student->refresh();
         $this->assertSame('اسم جديد', $student->name);
-        $this->assertSame('2026-10-31', $student->next_renewal_date->toDateString());
+        $this->assertSame('2026-11-01', $student->next_renewal_date->toDateString());
     }
 }

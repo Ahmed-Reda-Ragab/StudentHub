@@ -37,6 +37,8 @@ return [
     ],
 
     'preview' => 'التجديد القادم:',
+    'preview_ends' => 'ينتهي الاشتراك:',
+    'period_ends' => 'نهاية الاشتراك',
     'days_left' => 'متبقي :days',
     'days_overdue' => 'متأخر :days',
     'due_today' => 'موعد التجديد النهارده',

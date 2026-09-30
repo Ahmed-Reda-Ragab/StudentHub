@@ -1,28 +1,39 @@
 import Alpine from 'alpinejs';
 import focus from '@alpinejs/focus';
 
-const PERIOD_DAYS = Number(document.documentElement.dataset.periodDays || 30);
+const PERIOD_MONTHS = Number(document.documentElement.dataset.periodMonths || 1);
 
 const pad = (n) => String(n).padStart(2, '0');
 
+const format = (date) => `${pad(date.getUTCDate())}/${pad(date.getUTCMonth() + 1)}/${date.getUTCFullYear()}`;
+
 /**
- * 'YYYY-MM-DD' + n days → 'dd/mm/YYYY' (UTC math, so no DST/timezone drift).
+ * Mirrors App\Support\SubscriptionPeriod::nextRenewal(): same day N months later,
+ * clamped to the end of a shorter month (31/01 → 28/02). UTC math avoids DST drift.
  */
-function addDaysFormatted(iso, days) {
+function nextRenewal(iso) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(iso ?? '')) {
-        return '';
+        return null;
     }
 
     const [y, m, d] = iso.split('-').map(Number);
-    const date = new Date(Date.UTC(y, m - 1, d + days));
+    const lastDayOfTarget = new Date(Date.UTC(y, m - 1 + PERIOD_MONTHS + 1, 0)).getUTCDate();
 
-    return `${pad(date.getUTCDate())}/${pad(date.getUTCMonth() + 1)}/${date.getUTCFullYear()}`;
+    return new Date(Date.UTC(y, m - 1 + PERIOD_MONTHS, Math.min(d, lastDayOfTarget)));
 }
 
 Alpine.plugin(focus);
 
-// Live preview of the next renewal date: x-text="$nextRenewal(date)"
-Alpine.magic('nextRenewal', () => (iso) => addDaysFormatted(iso, PERIOD_DAYS));
+// Live previews: x-text="$nextRenewal(date)" / x-text="$periodEnd(date)" (the day before the renewal)
+Alpine.magic('nextRenewal', () => (iso) => {
+    const date = nextRenewal(iso);
+    return date ? format(date) : '';
+});
+
+Alpine.magic('periodEnd', () => (iso) => {
+    const date = nextRenewal(iso);
+    return date ? format(new Date(date.getTime() - 86_400_000)) : '';
+});
 
 /**
  * Loader + double-submit guard for every form (see <x-form>).

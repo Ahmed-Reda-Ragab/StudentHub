@@ -1,0 +1,85 @@
+{
+  "_cairo-400-normal-CAYwymWN.woff": {
+    "file": "assets/cairo-400-normal-CAYwymWN.woff",
+    "src": "_cairo-400-normal-CAYwymWN.woff"
+  },
+  "_cairo-400-normal-DN15VWMM.woff2": {
+    "file": "assets/cairo-400-normal-DN15VWMM.woff2",
+    "src": "_cairo-400-normal-DN15VWMM.woff2"
+  },
+  "_cairo-400-normal-Dh7otpdh.woff2": {
+    "file": "assets/cairo-400-normal-Dh7otpdh.woff2",
+    "src": "_cairo-400-normal-Dh7otpdh.woff2"
+  },
+  "_cairo-400-normal-b1R3q6Pf.woff": {
+    "file": "assets/cairo-400-normal-b1R3q6Pf.woff",
+    "src": "_cairo-400-normal-b1R3q6Pf.woff"
+  },
+  "_cairo-500-normal-BADfnM6v.woff": {
+    "file": "assets/cairo-500-normal-BADfnM6v.woff",
+    "src": "_cairo-500-normal-BADfnM6v.woff"
+  },
+  "_cairo-500-normal-D-WQsSKQ.woff2": {
+    "file": "assets/cairo-500-normal-D-WQsSKQ.woff2",
+    "src": "_cairo-500-normal-D-WQsSKQ.woff2"
+  },
+  "_cairo-500-normal-DDl0i4Xv.woff2": {
+    "file": "assets/cairo-500-normal-DDl0i4Xv.woff2",
+    "src": "_cairo-500-normal-DDl0i4Xv.woff2"
+  },
+  "_cairo-500-normal-DkdkMETP.woff": {
+    "file": "assets/cairo-500-normal-DkdkMETP.woff",
+    "src": "_cairo-500-normal-DkdkMETP.woff"
+  },
+  "_cairo-600-normal-B3EOalmC.woff": {
+    "file": "assets/cairo-600-normal-B3EOalmC.woff",
+    "src": "_cairo-600-normal-B3EOalmC.woff"
+  },
+  "_cairo-600-normal-buYOP1M3.woff": {
+    "file": "assets/cairo-600-normal-buYOP1M3.woff",
+    "src": "_cairo-600-normal-buYOP1M3.woff"
+  },
+  "_cairo-600-normal-mGS0uvCM.woff2": {
+    "file": "assets/cairo-600-normal-mGS0uvCM.woff2",
+    "src": "_cairo-600-normal-mGS0uvCM.woff2"
+  },
+  "_cairo-600-normal-rkrvveqO.woff2": {
+    "file": "assets/cairo-600-normal-rkrvveqO.woff2",
+    "src": "_cairo-600-normal-rkrvveqO.woff2"
+  },
+  "_cairo-700-normal-6fcUy4Rc.woff": {
+    "file": "assets/cairo-700-normal-6fcUy4Rc.woff",
+    "src": "_cairo-700-normal-6fcUy4Rc.woff"
+  },
+  "_cairo-700-normal-C3GYtKbV.woff2": {
+    "file": "assets/cairo-700-normal-C3GYtKbV.woff2",
+    "src": "_cairo-700-normal-C3GYtKbV.woff2"
+  },
+  "_cairo-700-normal-CyOqhaeK.woff": {
+    "file": "assets/cairo-700-normal-CyOqhaeK.woff",
+    "src": "_cairo-700-normal-CyOqhaeK.woff"
+  },
+  "_cairo-700-normal-D3nDedWX.woff2": {
+    "file": "assets/cairo-700-normal-D3nDedWX.woff2",
+    "src": "_cairo-700-normal-D3nDedWX.woff2"
+  },
+  "_fonts-DSFBIOm5.css": {
+    "file": "assets/fonts-DSFBIOm5.css",
+    "src": "_fonts-DSFBIOm5.css"
+  },
+  "resources/css/app.css": {
+    "file": "assets/app-BR_igC9j.css",
+    "name": "app",
+    "names": [
+      "app.css"
+    ],
+    "src": "resources/css/app.css",
+    "isEntry": true
+  },
+  "resources/js/app.js": {
+    "file": "assets/app-CySk7yF0.js",
+    "name": "app",
+    "src": "resources/js/app.js",
+    "isEntry": true
+  }
+}

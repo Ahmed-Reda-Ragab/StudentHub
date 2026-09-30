@@ -21,7 +21,7 @@ class DuplicateSubmissionTest extends TestCase
             'name' => 'أحمد',
             'phone' => '01012345678',
             'code' => 'DUP-1',
-            'section' => 'grade_1',
+            'section' => 'science',
             'subscribed_on' => '2026-10-01',
         ];
     }

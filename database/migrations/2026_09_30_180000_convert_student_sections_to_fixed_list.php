@@ -1,20 +1,26 @@
 <?php
 
-use App\Enums\Section;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 /**
- * students.section goes from free text to a Section enum value.
+ * students.section goes from free text to a fixed list (see App\Enums\Section).
  *
- * Free text is matched best-effort ("أولى ثانوي" → grade_1, "تانية علمي" → grade_2_science, …).
- * Anything that doesn't name both grade and track unambiguously becomes NULL ("not set"), and the
- * original text is kept at the top of notes so the teacher can pick the right section later.
+ * Free text is matched best-effort ("علمي رياضة" → math, "ازهر ادبي" → azhar_arts, "مسار طب" → track_medicine, …).
+ * Anything that doesn't name a track unambiguously becomes NULL ("not set"), and the original text is
+ * kept at the top of notes so the teacher can pick the right section later.
+ *
+ * Values are string literals on purpose: this migration must keep working if the enum changes later.
  */
 return new class extends Migration
 {
+    private const VALUES = [
+        'science', 'math', 'arts', 'azhar_science', 'azhar_arts',
+        'track_medicine', 'track_engineering', 'track_humanities', 'track_business',
+    ];
+
     public function up(): void
     {
         Schema::table('students', function (Blueprint $table) {
@@ -28,7 +34,7 @@ return new class extends Migration
                         $section = $this->match((string) $row->section);
 
                         DB::table('students')->where('id', $row->id)->update([
-                            'section' => $section?->value,
+                            'section' => $section,
                             'notes' => $section || trim((string) $row->section) === ''
                                 ? $row->notes
                                 : trim("الشعبة القديمة: {$row->section}\n".$row->notes),
@@ -40,47 +46,38 @@ return new class extends Migration
 
     public function down(): void
     {
-        DB::table('students')->select(['id', 'section'])->orderBy('id')
-            ->chunkById(500, function ($rows) {
-                foreach ($rows as $row) {
-                    DB::table('students')->where('id', $row->id)->update([
-                        'section' => Section::tryFrom((string) $row->section)?->label() ?? '',
-                    ]);
-                }
-            });
+        DB::table('students')->whereNull('section')->update(['section' => '']);
 
         Schema::table('students', function (Blueprint $table) {
             $table->string('section', 100)->nullable(false)->change();
         });
     }
 
-    private function match(string $text): ?Section
+    private function match(string $text): ?string
     {
-        if (Section::tryFrom($text)) {
-            return Section::from($text);
+        if (in_array($text, self::VALUES, true)) {
+            return $text;
         }
 
-        // Normalize hamza/taa-marbuta variants so "اولي" / "أولى" / "الاول" all compare equal.
+        // Normalize hamza/taa-marbuta variants so "ادبي" / "أدبى" / "رياضه" / "رياضة" compare equal.
         $t = strtr($text, ['أ' => 'ا', 'إ' => 'ا', 'آ' => 'ا', 'ى' => 'ي', 'ة' => 'ه']);
+        $has = fn (string $pattern) => (bool) preg_match("/{$pattern}/u", $t);
 
-        $grade = match (true) {
-            (bool) preg_match('/اول|1|١/u', $t) => 1,
-            (bool) preg_match('/ثاني|تاني|ثانيه|تانيه|2|٢/u', $t) => 2,
-            (bool) preg_match('/ثالث|تالت|3|٣/u', $t) => 3,
-            default => null,
-        };
-
-        $arts = (bool) preg_match('/ادبي/u', $t);
-        $math = (bool) preg_match('/رياض/u', $t);
-        $science = (bool) preg_match('/علمي|علوم/u', $t);
+        $arts = $has('ادبي');
+        $science = $has('علمي|علوم');
+        $math = $has('رياض');
 
         return match (true) {
-            $grade === 1 => Section::Grade1,
-            $grade === 2 && $arts && ! $science => Section::Grade2Arts,
-            $grade === 2 && $science && ! $arts => Section::Grade2Science,
-            $grade === 3 && $arts && ! $science && ! $math => Section::Grade3Arts,
-            $grade === 3 && $math && ! $arts => Section::Grade3Math,
-            $grade === 3 && $science && ! $math && ! $arts => Section::Grade3Science,
+            $has('مسار') && $has('طب') => 'track_medicine',
+            $has('مسار') && $has('هندس') => 'track_engineering',
+            $has('مسار') && $has('اداب|فنون') => 'track_humanities',
+            $has('مسار') && $has('اعمال') => 'track_business',
+            $has('ازهر') && $arts && ! $science => 'azhar_arts',
+            $has('ازهر') && $science && ! $arts => 'azhar_science',
+            $has('ازهر') => null,
+            $math && ! $arts => 'math',
+            $science && ! $arts => 'science',
+            $arts && ! $science => 'arts',
             default => null,
         };
     }

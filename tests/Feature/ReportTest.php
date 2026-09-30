@@ -26,7 +26,7 @@ class ReportTest extends TestCase
     private function subscribe(User $user, string $date, int $price, int $commission, string $code): Student
     {
         return app(SubscriptionService::class)->addStudent($user, [
-            'name' => "طالب {$code}", 'phone' => '01012345678', 'code' => $code, 'section' => 'grade_1',
+            'name' => "طالب {$code}", 'phone' => '01012345678', 'code' => $code, 'section' => 'science',
             'subscribed_on' => $date, 'price' => $price, 'commission' => $commission,
         ]);
     }

@@ -3,38 +3,48 @@
 namespace App\Enums;
 
 /**
- * Secondary-school grade + track. The backing value is what's stored in students.section.
+ * Student track. The backing value is what's stored in students.section.
  */
 enum Section: string
 {
-    case Grade1 = 'grade_1';
-    case Grade2Science = 'grade_2_science';
-    case Grade2Arts = 'grade_2_arts';
-    case Grade3Science = 'grade_3_science';
-    case Grade3Math = 'grade_3_math';
-    case Grade3Arts = 'grade_3_arts';
+    case Science = 'science';
+    case Math = 'math';
+    case Arts = 'arts';
+    case AzharScience = 'azhar_science';
+    case AzharArts = 'azhar_arts';
+    case TrackMedicine = 'track_medicine';
+    case TrackEngineering = 'track_engineering';
+    case TrackHumanities = 'track_humanities';
+    case TrackBusiness = 'track_business';
 
     public function label(): string
     {
         return __("students.sections.{$this->value}");
     }
 
-    public function grade(): int
+    /**
+     * general = الثانوية العامة, azhar = الأزهر, baccalaureate = مسارات البكالوريا.
+     */
+    public function group(): string
     {
-        return (int) substr($this->value, 6, 1);
+        return match ($this) {
+            self::Science, self::Math, self::Arts => 'general',
+            self::AzharScience, self::AzharArts => 'azhar',
+            default => 'baccalaureate',
+        };
     }
 
     /**
-     * Cases grouped by grade, for <optgroup> rendering.
+     * Cases grouped for <optgroup> rendering.
      *
-     * @return array<int, list<self>>
+     * @return array<string, list<self>>
      */
     public static function grouped(): array
     {
         $groups = [];
 
         foreach (self::cases() as $case) {
-            $groups[$case->grade()][] = $case;
+            $groups[$case->group()][] = $case;
         }
 
         return $groups;

@@ -23,19 +23,22 @@ return [
     'section_placeholder' => 'اختر الشعبة',
     'section_missing' => 'غير محددة',
 
-    'grades' => [
-        1 => 'الصف الأول الثانوي',
-        2 => 'الصف الثاني الثانوي',
-        3 => 'الصف الثالث الثانوي',
+    'section_groups' => [
+        'general' => 'ثانوية عامة',
+        'azhar' => 'أزهر',
+        'baccalaureate' => 'بكالوريا',
     ],
 
     'sections' => [
-        'grade_1' => 'الصف الأول الثانوي',
-        'grade_2_science' => 'الثاني الثانوي - علمي',
-        'grade_2_arts' => 'الثاني الثانوي - أدبي',
-        'grade_3_science' => 'الثالث الثانوي - علمي علوم',
-        'grade_3_math' => 'الثالث الثانوي - علمي رياضة',
-        'grade_3_arts' => 'الثالث الثانوي - أدبي',
+        'science' => 'علمي علوم',
+        'math' => 'علمي رياضة',
+        'arts' => 'أدبي',
+        'azhar_science' => 'أزهر علمي',
+        'azhar_arts' => 'أزهر أدبي',
+        'track_medicine' => 'مسار طب',
+        'track_engineering' => 'مسار هندسة',
+        'track_humanities' => 'مسار آداب وفنون',
+        'track_business' => 'مسار أعمال',
     ],
 
     'search' => [

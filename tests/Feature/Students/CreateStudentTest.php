@@ -30,7 +30,7 @@ class CreateStudentTest extends TestCase
             'name' => 'أحمد علي',
             'phone' => '010 1234 5678',
             'code' => '123456',
-            'section' => 'grade_1',
+            'section' => 'science',
             'subscribed_on' => '2026-10-01',
             'notes' => 'طالب ممتاز',
         ]);
@@ -125,17 +125,17 @@ class CreateStudentTest extends TestCase
         $this->actingAs($user)->post('/students', $this->payload(['section' => 'أولى ثانوي']))
             ->assertSessionHasErrors('section');
 
-        $this->actingAs($user)->post('/students', $this->payload(['section' => 'grade_2_arts']));
+        $this->actingAs($user)->post('/students', $this->payload(['section' => 'azhar_arts']));
 
         $student = Student::sole();
-        $this->assertSame(Section::Grade2Arts, $student->section);
+        $this->assertSame(Section::AzharArts, $student->section);
 
         $this->actingAs($user)->get(route('students.create'))
-            ->assertSee('الثاني الثانوي - علمي')
-            ->assertSee('الثالث الثانوي - علمي رياضة');
+            ->assertSee('علمي رياضة')
+            ->assertSee('مسار آداب وفنون');
 
         $this->actingAs($user)->get(route('students.show', $student))
-            ->assertSee('الثاني الثانوي - أدبي');
+            ->assertSee('أزهر أدبي');
     }
 
     public function test_subscription_dates_cannot_be_changed_via_update(): void
@@ -147,7 +147,7 @@ class CreateStudentTest extends TestCase
             'name' => 'اسم جديد',
             'phone' => '01111111111',
             'code' => $student->code,
-            'section' => 'grade_2_science',
+            'section' => 'math',
             'last_subscription_date' => '2020-01-01',
             'next_renewal_date' => '2020-01-31',
         ]))->assertRedirect(route('students.show', $student));

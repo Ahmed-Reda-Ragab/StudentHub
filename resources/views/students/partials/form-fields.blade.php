@@ -9,8 +9,8 @@
     <x-input name="code" :label="__('students.fields.code')" :value="$student?->code" dir="ltr" required />
     @php $currentSection = (string) old('section', $student?->section?->value); @endphp
     <x-select name="section" :label="__('students.fields.section')" :placeholder="__('students.section_placeholder')" required>
-        @foreach (\App\Enums\Section::grouped() as $grade => $sections)
-            <optgroup label="{{ __("students.grades.{$grade}") }}">
+        @foreach (\App\Enums\Section::grouped() as $group => $sections)
+            <optgroup label="{{ __("students.section_groups.{$group}") }}">
                 @foreach ($sections as $section)
                     <option value="{{ $section->value }}" @selected($currentSection === $section->value)>{{ $section->label() }}</option>
                 @endforeach

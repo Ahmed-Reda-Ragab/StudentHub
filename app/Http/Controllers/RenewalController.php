@@ -16,7 +16,13 @@ class RenewalController extends Controller
     public function store(RenewStudentRequest $request, Student $student, SubscriptionService $subscriptions): RedirectResponse
     {
         try {
-            $subscriptions->renew($student, $request->renewalDate(), $request->validated('note'));
+            $subscriptions->renew(
+                $student,
+                $request->renewalDate(),
+                price: $request->validated('price'),
+                commission: $request->validated('commission'),
+                note: $request->validated('note'),
+            );
         } catch (ValidationException $e) {
             throw $e->errorBag('renewal');
         }

@@ -23,7 +23,7 @@ class SubscriptionService
     public function __construct(private readonly SubscriptionPeriod $period) {}
 
     /**
-     * @param  array{name: string, phone: string, code: string, section: string, notes?: ?string, subscribed_on: string|CarbonInterface, amount?: ?string}  $data
+     * @param  array{name: string, phone: string, code: string, section: string, notes?: ?string, subscribed_on: string|CarbonInterface, price?: numeric|null, commission?: numeric|null}  $data
      *
      * @throws ValidationException
      */
@@ -31,9 +31,10 @@ class SubscriptionService
     {
         $startDate = CarbonImmutable::parse($data['subscribed_on'])->startOfDay();
         $nextRenewal = $this->period->endsOn($startDate);
+        $pricing = $this->pricing($data['price'] ?? null, $data['commission'] ?? null);
 
         try {
-            return DB::transaction(function () use ($user, $data, $startDate, $nextRenewal) {
+            return DB::transaction(function () use ($user, $data, $startDate, $nextRenewal, $pricing) {
                 // Lock the owner row so concurrent inserts for the same user get sequential numbers.
                 User::query()->whereKey($user->getKey())->lockForUpdate()->first();
 
@@ -51,7 +52,7 @@ class SubscriptionService
                     'type' => SubscriptionType::Initial,
                     'start_date' => $startDate,
                     'ends_on' => $nextRenewal,
-                    'amount' => $data['amount'] ?? null,
+                    ...$pricing,
                 ]);
 
                 return $student;
@@ -66,13 +67,19 @@ class SubscriptionService
     /**
      * @throws ValidationException
      */
-    public function renew(Student $student, CarbonInterface $date, ?string $note = null, ?string $amount = null): Subscription
-    {
+    public function renew(
+        Student $student,
+        CarbonInterface $date,
+        int|float|string|null $price = null,
+        int|float|string|null $commission = null,
+        ?string $note = null,
+    ): Subscription {
         $startDate = CarbonImmutable::parse($date->toDateString());
         $nextRenewal = $this->period->endsOn($startDate);
+        $pricing = $this->pricing($price, $commission);
 
         try {
-            $subscription = DB::transaction(function () use ($student, $startDate, $nextRenewal, $note, $amount) {
+            $subscription = DB::transaction(function () use ($student, $startDate, $nextRenewal, $pricing, $note) {
                 /** @var Student $locked */
                 $locked = Student::query()
                     ->withoutGlobalScopes()
@@ -87,7 +94,7 @@ class SubscriptionService
                     'type' => SubscriptionType::Renewal,
                     'start_date' => $startDate,
                     'ends_on' => $nextRenewal,
-                    'amount' => $amount,
+                    ...$pricing,
                     'note' => $note,
                 ]);
 
@@ -107,6 +114,27 @@ class SubscriptionService
         $student->refresh();
 
         return $subscription;
+    }
+
+    /**
+     * Falls back to the configured defaults; commission (profit) can never exceed the price.
+     *
+     * @return array{price: float, commission: float}
+     *
+     * @throws ValidationException
+     */
+    private function pricing(int|float|string|null $price, int|float|string|null $commission): array
+    {
+        $price = (float) ($price ?? config('subscriptions.pricing.price'));
+        $commission = (float) ($commission ?? config('subscriptions.pricing.commission'));
+
+        if ($price < 0 || $commission < 0 || $commission > $price) {
+            throw ValidationException::withMessages([
+                'commission' => __('validation.custom.commission.lte'),
+            ]);
+        }
+
+        return ['price' => $price, 'commission' => $commission];
     }
 
     private function nextNumberFor(User $user): int

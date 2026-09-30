@@ -84,30 +84,45 @@
                 <h2 id="history-title" class="text-lg font-bold text-slate-900">{{ __('subscriptions.history.title') }}</h2>
                 <p class="mt-1 text-xs text-slate-500">{{ __('subscriptions.history.read_only') }}</p>
             </div>
+            <div class="overflow-x-auto">
             <table class="w-full text-sm">
                 <thead class="text-xs font-semibold text-slate-500">
                     <tr>
-                        <th scope="col" class="px-6 py-3 text-start">{{ __('subscriptions.history.type') }}</th>
-                        <th scope="col" class="px-6 py-3 text-start">{{ __('subscriptions.history.start_date') }}</th>
-                        <th scope="col" class="px-6 py-3 text-start">{{ __('subscriptions.history.ends_on') }}</th>
+                        <th scope="col" class="px-4 py-3 text-start sm:px-6">{{ __('subscriptions.history.type') }}</th>
+                        <th scope="col" class="px-4 py-3 text-start sm:px-6">{{ __('subscriptions.history.start_date') }}</th>
+                        <th scope="col" class="px-4 py-3 text-start sm:px-6">{{ __('subscriptions.history.ends_on') }}</th>
+                        <th scope="col" class="px-4 py-3 text-start sm:px-6">{{ __('subscriptions.pricing.price') }}</th>
+                        <th scope="col" class="px-4 py-3 text-start sm:px-6">{{ __('subscriptions.pricing.commission_short') }}</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100">
                     @foreach ($student->subscriptions as $subscription)
                         <tr @class(['bg-indigo-50/40' => $loop->first])>
-                            <td class="px-6 py-3">
+                            <td class="px-4 py-3 sm:px-6">
                                 <span @class([
                                     'inline-flex rounded-md px-2 py-0.5 text-xs font-semibold',
                                     'bg-indigo-50 text-indigo-700' => $subscription->type === \App\Enums\SubscriptionType::Initial,
                                     'bg-slate-100 text-slate-700' => $subscription->type === \App\Enums\SubscriptionType::Renewal,
                                 ])>{{ $subscription->type->label() }}</span>
                             </td>
-                            <td class="px-6 py-3 font-semibold ltr-nums">{{ $subscription->start_date->format('d/m/Y') }}</td>
-                            <td class="px-6 py-3 text-slate-600 ltr-nums">{{ $subscription->ends_on->format('d/m/Y') }}</td>
+                            <td class="px-4 py-3 font-semibold ltr-nums sm:px-6">{{ $subscription->start_date->format('d/m/Y') }}</td>
+                            <td class="px-4 py-3 text-slate-600 ltr-nums sm:px-6">{{ $subscription->ends_on->format('d/m/Y') }}</td>
+                            <td class="px-4 py-3 sm:px-6"><x-money :value="$subscription->price" /></td>
+                            <td class="px-4 py-3 text-emerald-700 sm:px-6"><x-money :value="$subscription->commission" /></td>
                         </tr>
                     @endforeach
                 </tbody>
+                <tfoot class="border-t border-slate-200 bg-slate-50 text-sm font-bold">
+                    <tr>
+                        <th scope="row" colspan="3" class="px-4 py-3 text-start sm:px-6">
+                            {{ __('subscriptions.pricing.total_paid') }} / {{ __('subscriptions.pricing.total_commission') }}
+                        </th>
+                        <td class="px-4 py-3 sm:px-6"><x-money :value="$student->subscriptions->sum('price')" /></td>
+                        <td class="px-4 py-3 text-emerald-700 sm:px-6"><x-money :value="$student->subscriptions->sum('commission')" /></td>
+                    </tr>
+                </tfoot>
             </table>
+            </div>
         </section>
     </div>
 

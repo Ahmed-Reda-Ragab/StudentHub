@@ -5,6 +5,8 @@
 @php
     $errorBag = $errors->getBag('renewal');
     $today = today()->toDateString();
+    $defaultPrice = (string) config('subscriptions.pricing.price');
+    $defaultCommission = (string) config('subscriptions.pricing.commission');
 @endphp
 
 <div
@@ -14,8 +16,15 @@
         name: @js(old('renewal_name', '')),
         last: @js(old('renewal_last', '')),
         date: @js(old('renewed_on', $today)),
+        price: @js((string) old('price', $defaultPrice)),
+        commission: @js((string) old('commission', $defaultCommission)),
         show(detail) {
-            Object.assign(this, detail, { date: @js($today), open: true });
+            Object.assign(this, detail, {
+                date: @js($today),
+                price: @js($defaultPrice),
+                commission: @js($defaultCommission),
+                open: true,
+            });
             this.$nextTick(() => this.$refs.date.focus());
         },
     }"
@@ -64,6 +73,8 @@
                 </p>
                 <p class="mt-1 text-xs text-slate-500 ltr-nums" x-show="last" x-text="@js(__('subscriptions.renew.last', ['date' => '__D__'])).replace('__D__', last)"></p>
             </x-input>
+
+            <x-pricing-fields bag="renewal" id-prefix="renewal" />
 
             <div class="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
                 <x-button type="button" variant="secondary" x-on:click="open = false">{{ __('app.actions.cancel') }}</x-button>

@@ -8,6 +8,15 @@ return [
     'period_days' => (int) env('SUBSCRIPTION_PERIOD_DAYS', 30),
 
     /*
+    | Default price and commission (profit) pre-filled for every subscription/renewal.
+    | Both remain editable per entry.
+    */
+    'pricing' => [
+        'price' => (float) env('SUBSCRIPTION_DEFAULT_PRICE', 200),
+        'commission' => (float) env('SUBSCRIPTION_DEFAULT_COMMISSION', 50),
+    ],
+
+    /*
     | Students per page on the students list.
     */
     'per_page' => 25,

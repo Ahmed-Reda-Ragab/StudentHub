@@ -79,6 +79,8 @@ class StudentFactory extends Factory
                 'type' => SubscriptionType::Initial,
                 'start_date' => $student->last_subscription_date,
                 'ends_on' => $student->next_renewal_date,
+                'price' => config('subscriptions.pricing.price'),
+                'commission' => config('subscriptions.pricing.commission'),
             ]);
         });
     }

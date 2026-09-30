@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Http\Requests\Concerns\ValidatesPricing;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
@@ -12,6 +13,8 @@ use Illuminate\Foundation\Http\FormRequest;
  */
 class RenewStudentRequest extends FormRequest
 {
+    use ValidatesPricing;
+
     /**
      * Keep the modal open on the page when validation fails.
      */
@@ -22,6 +25,11 @@ class RenewStudentRequest extends FormRequest
         return $this->user()?->can('renew', $this->route('student')) ?? false;
     }
 
+    protected function prepareForValidation(): void
+    {
+        $this->mergeDefaultPricing();
+    }
+
     /**
      * @return array<string, ValidationRule|array<mixed>|string>
      */
@@ -30,6 +38,7 @@ class RenewStudentRequest extends FormRequest
         return [
             'renewed_on' => ['required', 'date_format:Y-m-d'],
             'note' => ['nullable', 'string', 'max:255'],
+            ...$this->pricingRules(),
         ];
     }
 

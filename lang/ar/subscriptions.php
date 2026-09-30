@@ -20,6 +20,15 @@ return [
         'renewal' => 'تجديد',
     ],
 
+    'pricing' => [
+        'price' => 'السعر',
+        'commission' => 'العمولة (الربح)',
+        'commission_short' => 'العمولة',
+        'currency' => 'ج.م',
+        'total_paid' => 'إجمالي المدفوع',
+        'total_commission' => 'إجمالي الربح',
+    ],
+
     'history' => [
         'title' => 'سجل الاشتراكات والتجديدات',
         'type' => 'النوع',

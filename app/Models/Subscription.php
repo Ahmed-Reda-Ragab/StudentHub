@@ -21,10 +21,11 @@ use LogicException;
  * @property SubscriptionType $type
  * @property CarbonImmutable $start_date
  * @property CarbonImmutable $ends_on
- * @property ?string $amount
+ * @property string $price what the student paid
+ * @property string $commission the user's profit out of the price
  * @property ?string $note
  */
-#[Fillable(['user_id', 'type', 'start_date', 'ends_on', 'amount', 'note'])]
+#[Fillable(['user_id', 'type', 'start_date', 'ends_on', 'price', 'commission', 'note'])]
 class Subscription extends Model
 {
     use BelongsToUser;
@@ -41,7 +42,8 @@ class Subscription extends Model
             'type' => SubscriptionType::class,
             'start_date' => DateOnly::class,
             'ends_on' => DateOnly::class,
-            'amount' => 'decimal:2',
+            'price' => 'decimal:2',
+            'commission' => 'decimal:2',
         ];
     }
 

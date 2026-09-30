@@ -37,7 +37,14 @@ return [
     'unique' => ':attribute ده مستخدم بالفعل.',
     'uuid' => ':attribute غير صحيح.',
 
+    'lte' => [
+        'numeric' => ':attribute لازم يكون أقل من أو يساوي :value.',
+    ],
+
     'custom' => [
+        'commission' => [
+            'lte' => 'العمولة (الربح) لازم متزيدش عن السعر.',
+        ],
         'code' => [
             'unique' => 'الكود ده مستخدم لطالب تاني عندك.',
         ],
@@ -57,5 +64,7 @@ return [
         'subscribed_on' => 'تاريخ الاشتراك',
         'renewed_on' => 'تاريخ التجديد',
         'note' => 'الملاحظة',
+        'price' => 'السعر',
+        'commission' => 'العمولة',
     ],
 ];

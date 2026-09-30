@@ -19,6 +19,11 @@
                 </p>
             </x-input>
         </div>
+
+        <x-pricing-fields x-data="{
+            price: {{ \Illuminate\Support\Js::from((string) old('price', config('subscriptions.pricing.price'))) }},
+            commission: {{ \Illuminate\Support\Js::from((string) old('commission', config('subscriptions.pricing.commission'))) }},
+        }" />
     @endunless
 
     <div class="sm:col-span-2">

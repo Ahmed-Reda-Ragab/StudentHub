@@ -8,9 +8,6 @@ use App\Services\SubscriptionService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Validation\ValidationException;
 
-/**
- * Append-only: renewals can be created, never updated or deleted (no routes for it).
- */
 class RenewalController extends Controller
 {
     public function store(RenewStudentRequest $request, Student $student, SubscriptionService $subscriptions): RedirectResponse

@@ -9,7 +9,6 @@ use App\Models\Subscription;
 use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use LogicException;
 use Tests\TestCase;
 
 class RenewalTest extends TestCase
@@ -119,21 +118,5 @@ class RenewalTest extends TestCase
         $second->assertSessionHasNoErrors();
 
         $this->assertCount(2, $this->student->subscriptions()->get());
-    }
-
-    public function test_subscriptions_are_append_only(): void
-    {
-        $subscription = $this->student->subscriptions()->sole();
-
-        $this->expectException(LogicException::class);
-
-        $subscription->update(['start_date' => '2020-01-01']);
-    }
-
-    public function test_ledger_cannot_be_deleted_either(): void
-    {
-        $this->expectException(LogicException::class);
-
-        $this->student->subscriptions()->sole()->delete();
     }
 }

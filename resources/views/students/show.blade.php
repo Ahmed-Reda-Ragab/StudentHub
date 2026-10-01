@@ -82,11 +82,10 @@
             </dl>
         </section>
 
-        {{-- Ledger (read-only) --}}
+        {{-- Ledger --}}
         <section class="card lg:col-span-2" aria-labelledby="history-title">
             <div class="border-b border-slate-100 p-6 pb-4">
                 <h2 id="history-title" class="text-lg font-bold text-slate-900">{{ __('subscriptions.history.title') }}</h2>
-                <p class="mt-1 text-xs text-slate-500">{{ __('subscriptions.history.read_only') }}</p>
             </div>
             <div class="overflow-x-auto">
             <table class="w-full text-sm">
@@ -97,6 +96,7 @@
                         <th scope="col" class="px-4 py-3 text-start sm:px-6">{{ __('subscriptions.history.ends_on') }}</th>
                         <th scope="col" class="px-4 py-3 text-start sm:px-6">{{ __('subscriptions.pricing.price') }}</th>
                         <th scope="col" class="px-4 py-3 text-start sm:px-6">{{ __('subscriptions.pricing.commission_short') }}</th>
+                        <th scope="col" class="px-4 py-3 sm:px-6"><span class="sr-only">{{ __('subscriptions.history.actions') }}</span></th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-slate-100">
@@ -113,6 +113,39 @@
                             <td class="px-4 py-3 text-slate-600 ltr-nums sm:px-6">{{ $subscription->ends_on->format('d/m/Y') }}</td>
                             <td class="px-4 py-3 sm:px-6"><x-money :value="$subscription->price" /></td>
                             <td class="px-4 py-3 text-emerald-700 sm:px-6"><x-money :value="$subscription->commission" /></td>
+                            <td class="px-2 py-1 sm:px-4">
+                                <div class="flex justify-end gap-1" x-data>
+                                    <x-button
+                                        type="button"
+                                        variant="ghost"
+                                        class="!px-3"
+                                        aria-label="{{ __('app.actions.edit') }}"
+                                        x-on:click="$dispatch('edit-subscription', {{ \Illuminate\Support\Js::from([
+                                            'action' => route('subscriptions.update', $subscription),
+                                            'date' => $subscription->start_date->toDateString(),
+                                            'price' => (string) $subscription->price,
+                                            'commission' => (string) $subscription->commission,
+                                            'note' => (string) $subscription->note,
+                                        ]) }})"
+                                    >
+                                        <x-icon name="pencil-square" />
+                                    </x-button>
+                                    @if ($subscription->type === \App\Enums\SubscriptionType::Renewal)
+                                        <x-button
+                                            type="button"
+                                            variant="ghost"
+                                            class="!px-3 text-red-600 hover:!bg-red-50 hover:!text-red-700"
+                                            aria-label="{{ __('app.actions.delete') }}"
+                                            x-on:click="$dispatch('delete-subscription', {{ \Illuminate\Support\Js::from([
+                                                'action' => route('subscriptions.destroy', $subscription),
+                                                'date' => $subscription->start_date->format('d/m/Y'),
+                                            ]) }}); $dispatch('open-modal', 'delete-subscription')"
+                                        >
+                                            <x-icon name="trash" />
+                                        </x-button>
+                                    @endif
+                                </div>
+                            </td>
                         </tr>
                     @endforeach
                 </tbody>
@@ -123,6 +156,7 @@
                         </th>
                         <td class="px-4 py-3 sm:px-6"><x-money :value="$student->subscriptions->sum('price')" /></td>
                         <td class="px-4 py-3 text-emerald-700 sm:px-6"><x-money :value="$student->subscriptions->sum('commission')" /></td>
+                        <td></td>
                     </tr>
                 </tfoot>
             </table>
@@ -132,6 +166,17 @@
 
     <x-slot:modals>
         <x-renewal-modal />
+        <x-subscription-edit-modal />
+
+        <x-modal name="delete-subscription" :title="__('subscriptions.delete.title')">
+            <div x-data="{ action: '', date: '' }" x-on:delete-subscription.window="action = $event.detail.action; date = $event.detail.date">
+                <p class="text-sm text-slate-600" x-text="@js(__('subscriptions.delete.body', ['date' => '__D__'])).replace('__D__', date)"></p>
+                <x-form action="" x-bind:action="action" method="DELETE" class="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                    <x-button type="button" variant="secondary" x-on:click="$dispatch('close-modal', 'delete-subscription')">{{ __('app.actions.cancel') }}</x-button>
+                    <x-button variant="danger" icon="trash" :loading-text="__('app.actions.deleting')">{{ __('app.actions.delete') }}</x-button>
+                </x-form>
+            </div>
+        </x-modal>
 
         <x-modal name="delete-student" :title="__('students.delete.title')">
             <p class="text-sm text-slate-600">{{ __('students.delete.body', ['name' => $student->name]) }}</p>

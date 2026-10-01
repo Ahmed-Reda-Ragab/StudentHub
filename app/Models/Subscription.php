@@ -9,11 +9,10 @@ use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use LogicException;
 
 /**
- * Append-only ledger entry. Records are never updated or deleted by the
- * application (DB-level cascade on student/user removal is the only exception).
+ * Ledger entry. Edits and deletions go through App\Services\SubscriptionService,
+ * which keeps the student's denormalized dates in sync with the ledger.
  *
  * @property int $id
  * @property int $student_id
@@ -29,12 +28,6 @@ use LogicException;
 class Subscription extends Model
 {
     use BelongsToUser;
-
-    protected static function booted(): void
-    {
-        static::updating(fn () => throw new LogicException('Subscriptions are append-only and cannot be updated.'));
-        static::deleting(fn () => throw new LogicException('Subscriptions are append-only and cannot be deleted.'));
-    }
 
     protected function casts(): array
     {

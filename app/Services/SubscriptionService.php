@@ -119,6 +119,131 @@ class SubscriptionService
     }
 
     /**
+     * The new date must stay strictly between the neighbouring entries, so the
+     * ledger order (and the initial subscription being first) never changes.
+     *
+     * @throws ValidationException
+     */
+    public function update(
+        Subscription $subscription,
+        CarbonInterface $date,
+        int|float|string|null $price,
+        int|float|string|null $commission,
+        ?string $note = null,
+    ): Subscription {
+        $startDate = CarbonImmutable::parse($date->toDateString());
+        $pricing = $this->pricing($price, $commission);
+
+        try {
+            DB::transaction(function () use ($subscription, $startDate, $pricing, $note) {
+                $student = $this->lockStudent($subscription->student_id);
+
+                $this->ensureDateFitsBetweenNeighbours($subscription, $startDate);
+
+                $subscription->update([
+                    'start_date' => $startDate,
+                    'ends_on' => $this->period->endsOn($startDate),
+                    ...$pricing,
+                    'note' => $note,
+                ]);
+
+                $this->syncStudentDates($student);
+            });
+        } catch (UniqueConstraintViolationException) {
+            throw ValidationException::withMessages([
+                'start_date' => __('subscriptions.messages.duplicate_renewal'),
+            ]);
+        }
+
+        return $subscription;
+    }
+
+    /**
+     * Only renewals can be deleted — the initial subscription goes with the student.
+     *
+     * @throws ValidationException
+     */
+    public function delete(Subscription $subscription): void
+    {
+        if ($subscription->type === SubscriptionType::Initial) {
+            throw ValidationException::withMessages([
+                'subscription' => __('subscriptions.messages.cannot_delete_initial'),
+            ]);
+        }
+
+        DB::transaction(function () use ($subscription) {
+            $student = $this->lockStudent($subscription->student_id);
+
+            $subscription->delete();
+
+            $this->syncStudentDates($student);
+        });
+    }
+
+    private function lockStudent(int $studentId): Student
+    {
+        return Student::query()
+            ->withoutGlobalScopes()
+            ->whereKey($studentId)
+            ->lockForUpdate()
+            ->firstOrFail();
+    }
+
+    /**
+     * Rebuilds first/last/next dates from the ledger after an edit or deletion.
+     */
+    private function syncStudentDates(Student $student): void
+    {
+        $dates = Subscription::query()
+            ->withoutGlobalScopes()
+            ->where('student_id', $student->getKey())
+            ->toBase()
+            ->selectRaw('min(start_date) as first, max(start_date) as last')
+            ->first();
+
+        $last = CarbonImmutable::parse($dates->last);
+
+        $student->forceFill([
+            'first_subscription_date' => CarbonImmutable::parse($dates->first),
+            'last_subscription_date' => $last,
+            'next_renewal_date' => $this->period->nextRenewal($last),
+        ])->save();
+    }
+
+    /**
+     * @throws ValidationException
+     */
+    private function ensureDateFitsBetweenNeighbours(Subscription $subscription, CarbonImmutable $date): void
+    {
+        $siblings = Subscription::query()
+            ->withoutGlobalScopes()
+            ->where('student_id', $subscription->student_id)
+            ->whereKeyNot($subscription->getKey());
+
+        // Plain "Y-m-d" — a Carbon binding would compare as "Y-m-d H:i:s" on SQLite.
+        $original = $subscription->getOriginal('start_date')->toDateString();
+
+        $previous = (clone $siblings)->where('start_date', '<', $original)->max('start_date');
+        $next = (clone $siblings)->where('start_date', '>', $original)->min('start_date');
+
+        if ($previous && $date->lte(CarbonImmutable::parse($previous))) {
+            throw ValidationException::withMessages([
+                'start_date' => __('subscriptions.messages.date_after', [
+                    'date' => CarbonImmutable::parse($previous)->format('d/m/Y'),
+                ]),
+            ]);
+        }
+
+        if ($next && $date->gte(CarbonImmutable::parse($next))) {
+            throw ValidationException::withMessages([
+                'start_date' => __('subscriptions.messages.date_before', [
+                    'date' => CarbonImmutable::parse($next)->format('d/m/Y'),
+                ]),
+            ]);
+        }
+    }
+
+    /**
      * Falls back to the configured defaults; commission (profit) can never exceed the price.
      *
      * @return array{price: float, commission: float}

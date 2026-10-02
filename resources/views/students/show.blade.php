@@ -8,9 +8,9 @@
         <x-icon name="chevron-right" class="size-4" /> {{ __('students.title') }}
     </a>
 
-    <div class="grid gap-6 lg:grid-cols-3">
+    <div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {{-- Status card --}}
-        <section class="card p-6 lg:order-last" aria-labelledby="status-title">
+        <section class="card min-w-0 p-6 lg:order-last" aria-labelledby="status-title">
             <h2 id="status-title" class="sr-only">{{ __('students.fields.status') }}</h2>
             <x-status-badge :status="$status" class="!text-sm" />
 
@@ -46,7 +46,7 @@
         </section>
 
         {{-- Profile --}}
-        <section class="card p-6 lg:col-span-2" aria-labelledby="profile-title">
+        <section class="card min-w-0 p-6 lg:col-span-2" aria-labelledby="profile-title">
             <div class="flex items-start justify-between gap-4">
                 <div>
                     <p class="text-sm font-semibold text-slate-400 ltr-nums">#{{ $student->number }}</p>
@@ -83,12 +83,12 @@
         </section>
 
         {{-- Ledger --}}
-        <section class="card lg:col-span-2" aria-labelledby="history-title">
+        <section class="card min-w-0 lg:col-span-2" aria-labelledby="history-title">
             <div class="border-b border-slate-100 p-6 pb-4">
                 <h2 id="history-title" class="text-lg font-bold text-slate-900">{{ __('subscriptions.history.title') }}</h2>
             </div>
-            <div class="overflow-x-auto">
-            <table class="w-full text-sm">
+            <div class="relative overflow-x-auto">
+            <table class="w-full whitespace-nowrap text-sm">
                 <thead class="text-xs font-semibold text-slate-500">
                     <tr>
                         <th scope="col" class="px-4 py-3 text-start sm:px-6">{{ __('subscriptions.history.type') }}</th>

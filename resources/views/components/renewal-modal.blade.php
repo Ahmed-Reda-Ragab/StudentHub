@@ -40,7 +40,7 @@
 >
     <div x-show="open" x-transition.opacity class="fixed inset-0 bg-slate-900/40" @click="open = false"></div>
 
-    <div x-show="open" x-transition x-trap.inert.noscroll="open" class="card relative w-full max-w-md p-6 shadow-xl">
+    <div x-show="open" x-transition x-trap.inert.noscroll="open" class="card relative max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto overscroll-contain p-6 shadow-xl">
         <div class="mb-4 flex items-start justify-between gap-4">
             <div>
                 <h2 id="renewal-modal-title" class="text-lg font-bold text-slate-900">{{ __('subscriptions.renew.title') }}</h2>

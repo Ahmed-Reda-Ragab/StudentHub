@@ -22,7 +22,7 @@
         x-show="open"
         x-transition
         x-trap.inert.noscroll="open"
-        class="card relative w-full max-w-md p-6 shadow-xl"
+        class="card relative max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto overscroll-contain p-6 shadow-xl"
     >
         <div class="mb-4 flex items-start justify-between gap-4">
             <h2 id="modal-{{ $name }}-title" class="text-lg font-bold text-slate-900">{{ $title }}</h2>

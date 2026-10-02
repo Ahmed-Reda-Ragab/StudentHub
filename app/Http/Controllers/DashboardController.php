@@ -11,6 +11,7 @@ class DashboardController extends Controller
     {
         return view('dashboard', [
             'counts' => Student::statusCounts(Student::query()),
+            'sectionCounts' => Student::sectionCounts(Student::query()),
         ]);
     }
 }

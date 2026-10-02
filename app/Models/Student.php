@@ -146,4 +146,28 @@ class Student extends Model
             SubscriptionStatus::Expired->value => (int) $row->expired,
         ];
     }
+
+    /**
+     * Student count per section value ('' = section not chosen yet), every Section case included.
+     *
+     * @return array<string, int>
+     */
+    public static function sectionCounts(Builder $query): array
+    {
+        $rows = (clone $query)
+            ->toBase()
+            ->selectRaw('section, count(*) as total')
+            ->groupBy('section')
+            ->pluck('total', 'section');
+
+        $counts = [];
+
+        foreach (Section::cases() as $section) {
+            $counts[$section->value] = (int) ($rows[$section->value] ?? 0);
+        }
+
+        $counts[''] = (int) ($rows[''] ?? 0);
+
+        return $counts;
+    }
 }

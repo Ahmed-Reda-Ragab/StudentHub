@@ -8,7 +8,7 @@
 
     {{-- Date range filter --}}
     <div class="card mb-6 p-4 sm:p-5">
-        <x-form :action="route('reports.index')" method="GET" class="grid gap-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
+        <x-form :action="route('reports.index')" method="GET" class="grid grid-cols-1 gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
             <x-input name="from" type="date" :label="__('reports.filter.from')" :value="$from->toDateString()" required />
             <x-input name="to" type="date" :label="__('reports.filter.to')" :value="$to->toDateString()" required />
             <x-button icon="magnifying-glass" :loading-text="__('reports.filter.loading')">{{ __('reports.filter.submit') }}</x-button>
@@ -35,7 +35,7 @@
     </p>
 
     {{-- Totals --}}
-    <div class="mb-6 grid gap-4 sm:grid-cols-3">
+    <div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
         <div class="card p-5">
             <p class="text-sm text-slate-500">{{ __('reports.totals.price') }}</p>
             <x-money :value="$totals['price_total']" class="mt-1 block text-2xl font-bold text-slate-900" />
@@ -56,12 +56,12 @@
             <x-empty-state icon="chart-bar" :title="__('reports.empty')" />
         </div>
     @else
-        <div class="grid gap-6 lg:grid-cols-5">
+        <div class="grid grid-cols-1 gap-6 lg:grid-cols-5">
             {{-- Per day --}}
-            <section class="card lg:col-span-2" aria-labelledby="daily-title">
+            <section class="card min-w-0 lg:col-span-2" aria-labelledby="daily-title">
                 <h2 id="daily-title" class="border-b border-slate-100 px-5 py-4 text-base font-bold text-slate-900">{{ __('reports.daily.title') }}</h2>
-                <div class="overflow-x-auto">
-                    <table class="w-full text-sm">
+                <div class="relative overflow-x-auto">
+                    <table class="w-full whitespace-nowrap text-sm">
                         <thead class="text-xs font-semibold text-slate-500">
                             <tr>
                                 <th scope="col" class="px-4 py-3 text-start">{{ __('reports.daily.day') }}</th>
@@ -85,10 +85,10 @@
             </section>
 
             {{-- Entries --}}
-            <section class="card lg:col-span-3" aria-labelledby="entries-title">
+            <section class="card min-w-0 lg:col-span-3" aria-labelledby="entries-title">
                 <h2 id="entries-title" class="border-b border-slate-100 px-5 py-4 text-base font-bold text-slate-900">{{ __('reports.entries.title') }}</h2>
-                <div class="overflow-x-auto">
-                    <table class="w-full text-sm">
+                <div class="relative overflow-x-auto">
+                    <table class="w-full whitespace-nowrap text-sm">
                         <thead class="text-xs font-semibold text-slate-500">
                             <tr>
                                 <th scope="col" class="px-4 py-3 text-start">{{ __('subscriptions.history.start_date') }}</th>

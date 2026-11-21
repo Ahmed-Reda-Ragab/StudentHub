@@ -1,0 +1,30 @@
+{{- if not .Values.rollout.enabled }}
+# Plain RollingUpdate (scenarios 65, 66). With rollout.enabled=true the same pod template is rolled
+# out by Argo Rollouts instead (rollout.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "student-app.fullname" . }}
+  labels:
+    {{- include "student-app.labels" . | nindent 4 }}
+  annotations:
+    # Argo CD order: secrets (-2/-1) → migrations (0) → app (1).
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # New pod must pass /ready before an old one goes away → no capacity dip, no failed requests.
+      maxSurge: {{ .Values.rollingUpdate.maxSurge }}
+      maxUnavailable: {{ .Values.rollingUpdate.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "student-app.selectorLabels" . | nindent 6 }}
+  template:
+    {{- include "student-app.podTemplate" (dict "root" . "hashLabel" "pod-template-hash") | nindent 4 }}
+{{- end }}

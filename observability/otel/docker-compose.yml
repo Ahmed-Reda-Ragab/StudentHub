@@ -1,0 +1,35 @@
+# Tracing playground (scenario 72): OTel Collector + Jaeger all-in-one, next to the app.
+#
+#   docker compose up -d                                         # the app first (network student-app_default)
+#   docker compose -f observability/otel/docker-compose.yml up -d
+#   open http://localhost:16686                                  # Jaeger UI
+#
+# The app then needs the OTEL_* env vars from README.md (and the PHP extension/packages),
+# e.g. OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 — documentation only, the
+# app code in this repo is not instrumented yet.
+name: student-app-otel
+
+networks:
+  default: {}
+  app:
+    name: student-app_default
+    external: true
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.165.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./collector-jaeger.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317" # OTLP gRPC (apps on the host)
+      - "127.0.0.1:4318:4318" # OTLP HTTP
+    networks: [default, app] # reachable as otel-collector:4318 from the app containers
+    depends_on: [jaeger]
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/jaeger:2.23.0 # v2 all-in-one: OTLP in, in-memory storage, UI on 16686
+    ports:
+      - "127.0.0.1:16686:16686"
+    restart: unless-stopped

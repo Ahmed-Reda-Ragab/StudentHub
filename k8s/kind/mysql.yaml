@@ -1,0 +1,125 @@
+# Lab-only MySQL 8.4 for kind (scenario 60). On EKS the database is RDS (stack 60-eks)
+# and its endpoint/password come from SSM through External Secrets — never run MySQL like this
+# in production (single replica, no backups, static lab password).
+#
+#   kubectl create namespace student-app        # or: kubectl apply -f k8s/manifests/base/namespace.yaml
+#   kubectl apply -f k8s/kind/mysql.yaml
+#   kubectl -n student-app rollout status statefulset/mysql --timeout=180s
+#
+# The app reaches it as DB_HOST=mysql (the headless Service below resolves straight to the pod IP).
+# It runs as the image's mysql user (999) so the namespace can enforce the "restricted" Pod Security Standard.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-credentials
+  namespace: student-app
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/part-of: student-app-lab
+type: Opaque
+stringData:
+  # Lab defaults (same as docker-compose.yml). CI reads MYSQL_PASSWORD from here to build
+  # student-app-secrets, so there is a single source of truth for the password.
+  MYSQL_DATABASE: student_app
+  MYSQL_USER: student
+  MYSQL_PASSWORD: student-secret
+  MYSQL_ROOT_PASSWORD: root-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: student-app
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/part-of: student-app-lab
+spec:
+  # Headless: gives the StatefulSet stable DNS (mysql-0.mysql) and "mysql" resolves to Ready pods only.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: student-app
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/part-of: student-app-lab
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mysql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mysql
+        app.kubernetes.io/part-of: student-app-lab
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          args:
+            - --character-set-server=utf8mb4
+            - --collation-server=utf8mb4_unicode_ci
+          envFrom:
+            - secretRef:
+                name: mysql-credentials
+          ports:
+            - name: mysql
+              containerPort: 3306
+          # The entrypoint first runs a temporary server with --skip-networking to create the
+          # database/user; a TCP ping only succeeds once the real server is up.
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", 'mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent']
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", 'mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" --silent']
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # kind ships the local-path provisioner as the default "standard" StorageClass.
+        resources:
+          requests:
+            storage: 2Gi

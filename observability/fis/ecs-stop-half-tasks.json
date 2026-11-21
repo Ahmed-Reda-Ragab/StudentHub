@@ -1,0 +1,40 @@
+{
+  "description": "student-app-lab: stop 50% of the ECS service tasks. Hypothesis: the ALB stops routing to stopped tasks, the service replaces them, availability stays >= 99.5% and p95 < 300ms.",
+  "roleArn": "arn:aws:iam::<ACCOUNT_ID>:role/student-app-lab-fis",
+  "stopConditions": [
+    {
+      "source": "aws:cloudwatch:alarm",
+      "value": "arn:aws:cloudwatch:<REGION>:<ACCOUNT_ID>:alarm:student-app-lab-slo-fast-burn"
+    }
+  ],
+  "targets": {
+    "halfOfTheTasks": {
+      "resourceType": "aws:ecs:task",
+      "parameters": {
+        "cluster": "student-app-lab",
+        "service": "student-app-lab-app"
+      },
+      "selectionMode": "PERCENT(50)"
+    }
+  },
+  "actions": {
+    "stopTasks": {
+      "actionId": "aws:ecs:stop-task",
+      "description": "StopTask on half of the running tasks (SIGTERM, then SIGKILL after stopTimeout).",
+      "targets": {
+        "Tasks": "halfOfTheTasks"
+      }
+    }
+  },
+  "experimentOptions": {
+    "accountTargeting": "single-account",
+    "emptyTargetResolutionMode": "fail"
+  },
+  "tags": {
+    "Project": "student-app",
+    "Env": "lab",
+    "ManagedBy": "console",
+    "Scenario": "75",
+    "Name": "student-app-lab-ecs-stop-half-tasks"
+  }
+}

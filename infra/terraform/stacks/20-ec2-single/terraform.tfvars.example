@@ -1,0 +1,15 @@
+# cp terraform.tfvars.example terraform.tfvars   (terraform.tfvars is not committed)
+
+region   = "us-east-1"
+scenario = "20" # tag only: set the scenario you are practising (20-27, 31-33)
+
+# t3.small for build-on-server (20/31); t3.micro is enough when pulling from ECR (32/33).
+instance_type = "t3.small"
+arch          = "x86_64" # "arm64" + instance_type = "t4g.small" for Graviton (needs an arm64 image)
+
+# Lock HTTP to your IP if you want: curl -s https://checkip.amazonaws.com
+# http_cidrs = ["203.0.113.10/32"]
+
+# Scenario 31 only (SSH deploys). Default: no port 22, use `aws ssm start-session`.
+# ssh_cidrs = ["203.0.113.10/32"]
+# key_name  = "student-app-lab"

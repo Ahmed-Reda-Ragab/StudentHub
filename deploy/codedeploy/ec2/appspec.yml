@@ -1,0 +1,43 @@
+# CodeDeploy AppSpec — EC2 / ASG with the CodeDeploy agent (scenario 37).
+#
+# The revision is NOT the source code: it is a tiny bundle (see package-revision.sh)
+#   IMAGE_URI                 the image CI already built, tested and pushed (build once, deploy many)
+#   deploy.env                USE_LOCAL_MYSQL / ENV_NAME for this deployment group
+#   docker-compose.prod.yml   from the repo root
+#   scripts/                  deploy/ec2/deploy-pull-image.sh + render-env-from-ssm.sh (reused, not copied logic)
+#   hooks/                    the lifecycle scripts below
+#
+# In-place + ALB: BlockTraffic (deregister) -> ApplicationStop -> BeforeInstall -> Install (copy files)
+#   -> AfterInstall -> ApplicationStart -> ValidateService -> AllowTraffic (re-register).
+version: 0.0
+os: linux
+
+files:
+  - source: /
+    destination: /opt/student-app/release
+file_exists_behavior: OVERWRITE
+
+hooks:
+  # Runs from the PREVIOUS revision's bundle (absent on the first deployment).
+  ApplicationStop:
+    - location: hooks/application-stop.sh
+      timeout: 120
+      runas: root
+  BeforeInstall:
+    - location: hooks/before-install.sh
+      timeout: 300
+      runas: root
+  AfterInstall:
+    - location: hooks/after-install.sh
+      timeout: 120
+      runas: root
+  # Pull + migrate + recreate the container: image pulls and migrations need time.
+  ApplicationStart:
+    - location: hooks/application-start.sh
+      timeout: 900
+      runas: root
+  # The instance only goes back into the target group if /ready answers with the NEW version.
+  ValidateService:
+    - location: hooks/validate-service.sh
+      timeout: 300
+      runas: root

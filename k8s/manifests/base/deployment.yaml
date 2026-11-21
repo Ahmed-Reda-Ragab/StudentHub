@@ -1,0 +1,143 @@
+# The app as a plain Deployment (scenarios 60, 66). Every field below maps to a line of
+# docs/devops/CONVENTIONS.md §2/§3/§8 — the Helm chart renders the same pod spec.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: student-app
+  labels:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: web
+  annotations:
+    # Argo CD (if it ever syncs this kustomization): ExternalSecret (-1) → migrate Job (0) → app (1).
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  # 2 replicas = survive one pod/node loss. With the HPA (hpa.yaml) in charge you would delete this
+  # line in a GitOps repo, otherwise every `kubectl apply` resets the HPA's decision back to 2.
+  replicas: 2
+  revisionHistoryLimit: 5
+  # Scenario 66: zero-downtime rolling update. A new pod must be Ready (/ready = 200, DB reachable)
+  # before an old one is removed: capacity never drops below 2 (maxUnavailable 0), at most 3 pods (maxSurge 1).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  # A release that never becomes Ready (SRE_FAULT_UNHEALTHY / BOOT_FAIL drills) is marked
+  # ProgressDeadlineExceeded after 5 min; old pods keep serving because maxUnavailable is 0.
+  progressDeadlineSeconds: 300
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: student-app
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: student-app
+        app.kubernetes.io/component: web
+      annotations:
+        # Scraped by Prometheus' kubernetes-pods job (annotation discovery). With kube-prometheus-stack
+        # the PodMonitor in observability/k8s/kube-prometheus-stack-values.yaml scrapes the port named http.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: student-app
+      automountServiceAccountToken: false
+      # Don't inject one env var per Service in the namespace (noise, and name clashes like MYSQL_PORT).
+      enableServiceLinks: false
+      # preStop (10 s) + PHP-FPM graceful stop on SIGQUIT (≤ 30 s) must fit inside this budget,
+      # otherwise the kubelet SIGKILLs in-flight requests.
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 82        # www-data on Alpine (serversideup/php image)
+        runAsGroup: 82
+        fsGroup: 82
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread replicas over zones and nodes. ScheduleAnyway = best effort, never blocks a rollout on a
+      # small/1-node cluster. matchLabelKeys makes the skew per ReplicaSet revision, so a rolling
+      # update doesn't pile new pods next to old ones.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: student-app
+              app.kubernetes.io/component: web
+          matchLabelKeys: ["pod-template-hash"]
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: student-app
+              app.kubernetes.io/component: web
+          matchLabelKeys: ["pod-template-hash"]
+      containers:
+        - name: app
+          # Tag is set per environment by the overlays (`images:`) — a git SHA, never "latest".
+          image: student-app
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: student-app-config
+            - secretRef:
+                name: student-app-secrets
+          # Slow first boot (S6 + `php artisan optimize`) is covered by the startup probe, so liveness
+          # can stay strict without killing pods that are merely starting: up to 90 s to answer /up.
+          startupProbe:
+            httpGet:
+              path: /up
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 45
+          # Liveness = "is the process wedged?". /up never touches the DB, so a DB outage does not
+          # turn into a restart storm.
+          livenessProbe:
+            httpGet:
+              path: /up
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # Readiness = "may I receive traffic?". /ready pings the DB and honours the manual drain
+          # flag (POST /sre-lab/unready); failing it only removes the pod from Service endpoints.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+            successThreshold: 1
+          lifecycle:
+            # Endpoint removal propagates asynchronously (kube-proxy, ALB target deregistration).
+            # Keep serving for 10 s after the pod is marked Terminating so no new request lands on a
+            # stopped PHP-FPM; then the runtime sends the image's STOPSIGNAL (SIGQUIT = graceful).
+            # Native sleep action (beta/on since v1.30): no shell or `sleep` binary needed in the image.
+            preStop:
+              sleep:
+                seconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              # CPU limit caps a runaway request (/sre-lab/cpu) at 1 core; memory limit makes a leak an
+              # OOMKill of one pod instead of a node problem (scenario 6A).
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # readOnlyRootFilesystem stays false: S6-overlay and nginx write under /run, /etc and /tmp at
+            # boot. Hardening it needs emptyDir mounts for those paths (documented follow-up).
+            readOnlyRootFilesystem: false

@@ -1,0 +1,37 @@
+---
+# Idempotent: deploy-pull-image.sh (pull -> migrate -> recreate, a few seconds of downtime) runs
+# only when the release or the env changed. A second run with the same app_image is a no-op.
+# repo:tag and repo:tag@sha256:... count as the same release (deploy-ec2-ssm.yml records digests).
+- name: Read the current release
+  ansible.builtin.slurp:
+    src: "{{ app_dir }}/CURRENT_RELEASE"
+  register: app_current_release_file
+  failed_when: false
+
+- name: Decide whether a deploy is needed
+  ansible.builtin.set_fact:
+    app_current_release: "{{ (app_current_release_file.content | default('') | b64decode).strip() }}"
+
+- name: Deploy {{ app_image }}
+  ansible.builtin.command:
+    argv:
+      - "{{ app_dir }}/deploy-pull-image.sh"
+      - "{{ app_image }}"
+  environment:
+    APP_DIR: "{{ app_dir }}"
+    ENV_NAME: "{{ app_env_name }}"
+    AWS_REGION: "{{ app_aws_region }}"
+    USE_LOCAL_MYSQL: "{{ app_use_local_mysql | bool | string | lower }}"
+    RENDER_ENV: "false"   # env.yml already rendered it; one source of truth per run
+  when: >-
+    app_force_deploy | bool
+    or app_env_changed | default(false) | bool
+    or (app_current_release | regex_replace('@sha256:[0-9a-f]+$', ''))
+       != (app_image | regex_replace('@sha256:[0-9a-f]+$', ''))
+  register: app_deploy_result
+  changed_when: true
+
+- name: Show the deploy log
+  ansible.builtin.debug:
+    var: app_deploy_result.stdout_lines
+  when: app_deploy_result is not skipped

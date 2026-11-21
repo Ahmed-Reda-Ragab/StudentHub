@@ -1,0 +1,108 @@
+# Local / CI stack: app (built from docker/Dockerfile) + MySQL 8.4.
+#
+#   export APP_KEY=base64:$(openssl rand -base64 32)        # or reuse the one in your Laravel .env
+#   docker compose up -d --build --wait
+#   docker compose run --rm app php artisan migrate --force
+#   docker compose run --rm app php artisan db:seed --class=DemoSeeder --force
+#   open http://localhost:8080   (demo@example.com / password)
+#
+# Optional profiles:  --profile tools (adminer :8090)  --profile redis (sessions/cache in Redis, scenario 49)
+# Observability stack: observability/compose/docker-compose.yml (Prometheus, Grafana, Loki...)
+#
+# Compose-level variables use the LAB_ prefix so they never collide with keys in Laravel's .env
+# (which `docker compose` also reads for interpolation).
+name: student-app
+
+x-app-env: &app-env
+    APP_NAME: "Students Subscriptions"
+    APP_ENV: ${LAB_APP_ENV:-production}
+    APP_DEBUG: ${LAB_APP_DEBUG:-false}
+    APP_KEY: ${APP_KEY:?APP_KEY is required - generate one with `php artisan key:generate --show`}
+    APP_URL: ${LAB_APP_URL:-http://localhost:8080}
+    APP_VERSION: ${APP_VERSION:-local}
+    DEPLOY_COLOR: ${DEPLOY_COLOR:-none}
+    APP_TIMEZONE: Africa/Cairo
+    APP_LOCALE: ar
+    DB_CONNECTION: mysql
+    DB_HOST: mysql
+    DB_PORT: "3306"
+    DB_DATABASE: student_app
+    DB_USERNAME: student
+    DB_PASSWORD: ${LAB_DB_PASSWORD:-student-secret}
+    SESSION_DRIVER: ${LAB_SESSION_DRIVER:-database}
+    CACHE_STORE: ${LAB_CACHE_STORE:-database}
+    REDIS_HOST: redis
+    QUEUE_CONNECTION: sync
+    LOG_LEVEL: ${LAB_LOG_LEVEL:-info}
+    # SRE lab (see config/sre_lab.php)
+    SRE_LAB_ENABLED: ${SRE_LAB_ENABLED:-true}
+    SRE_LAB_TOKEN: ${SRE_LAB_TOKEN:-}
+    METRICS_ENABLED: ${METRICS_ENABLED:-true}
+    SRE_FAULT_ERROR_RATE: ${SRE_FAULT_ERROR_RATE:-0}
+    SRE_FAULT_LATENCY_MS: ${SRE_FAULT_LATENCY_MS:-0}
+    SRE_FAULT_UNHEALTHY: ${SRE_FAULT_UNHEALTHY:-false}
+    SRE_FAULT_BOOT_FAIL: ${SRE_FAULT_BOOT_FAIL:-false}
+    LOADTEST_USERS: ${LOADTEST_USERS:-20}
+    LOADTEST_STUDENTS_PER_USER: ${LOADTEST_STUDENTS_PER_USER:-100}
+
+services:
+    app:
+        build:
+            context: .
+            dockerfile: docker/Dockerfile
+            args:
+                APP_VERSION: ${APP_VERSION:-local}
+        image: ${LAB_IMAGE:-student-app:local}
+        environment: *app-env
+        ports:
+            - "${LAB_APP_PORT:-8080}:8080"
+        depends_on:
+            mysql:
+                condition: service_healthy
+        healthcheck:
+            test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/up || exit 1"]
+            interval: 5s
+            timeout: 3s
+            retries: 12
+            start_period: 20s
+        stop_grace_period: 30s
+        restart: unless-stopped
+
+    mysql:
+        image: mysql:8.4
+        command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+        environment:
+            MYSQL_DATABASE: student_app
+            MYSQL_USER: student
+            MYSQL_PASSWORD: ${LAB_DB_PASSWORD:-student-secret}
+            MYSQL_ROOT_PASSWORD: ${LAB_DB_ROOT_PASSWORD:-root-secret}
+        volumes:
+            - mysql-data:/var/lib/mysql
+        ports:
+            - "127.0.0.1:${LAB_DB_PORT:-33060}:3306"
+        healthcheck:
+            test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+            interval: 5s
+            timeout: 3s
+            retries: 30
+            start_period: 20s
+        restart: unless-stopped
+
+    redis:
+        image: redis:7.4-alpine
+        profiles: ["redis"]
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 5s
+            retries: 10
+
+    adminer:
+        image: adminer:4.8.1
+        profiles: ["tools"]
+        ports:
+            - "127.0.0.1:8090:8080"   # not 8081/8082: those are the blue/green slots of deploy/ec2/lb
+        environment:
+            ADMINER_DEFAULT_SERVER: mysql
+
+volumes:
+    mysql-data:

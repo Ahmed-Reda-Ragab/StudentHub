@@ -1,0 +1,134 @@
+---
+# MySQL container backups to S3 (scenario 27, stack 20).
+#   1. install/refresh the daily systemd timer (role mysql_backup)
+#   2. take a backup NOW (same unit the timer runs - one code path)
+#   3. optional restore drill: restore the newest dump into a SCRATCH database, compare row
+#      counts with the live one, drop the scratch DB, report the restore time (RTO evidence)
+#
+#   ansible-playbook playbooks/backup.yml -e backup_bucket=$(terraform -chdir=../terraform/stacks/20-ec2-single output -raw backup_bucket)
+#   ansible-playbook playbooks/backup.yml -e backup_bucket=... -e backup_restore_drill=true
+#
+# A backup you never restored is a hope, not a backup: run the drill regularly (scenario 77).
+- name: Back up MySQL to S3
+  hosts: "{{ target_hosts | default('role_app:&standalone') }}"
+  become: true
+  gather_facts: false
+  vars:
+    backup_restore_drill: false
+    backup_db_name: student_app
+    backup_drill_db: student_app_restore_drill
+    # `docker compose exec mysql` finds the container by project + service labels, so this works
+    # for the Recreate stack and for the lb stack (same compose project "student-app").
+    backup_mysql_exec:
+      - docker
+      - compose
+      - -f
+      - "{{ app_dir }}/docker-compose.prod.yml"
+      - exec
+      - -T
+      - mysql
+      - sh
+      - -c
+    backup_compose_env:
+      APP_ENV_FILE: "{{ app_dir }}/app.env"
+      MYSQL_ENV_FILE: "{{ app_dir }}/mysql.env"
+  tasks:
+    - name: Copy the compose file and scripts
+      ansible.builtin.include_role:
+        name: app
+        tasks_from: files
+
+    - name: Install the backup timer
+      ansible.builtin.include_role:
+        name: mysql_backup
+
+    # Type=oneshot: systemctl start blocks until the dump is in S3 and fails if the script fails.
+    - name: Take a backup now
+      ansible.builtin.systemd_service:
+        name: student-app-mysql-backup.service
+        state: started
+
+    - name: Find the newest dump
+      ansible.builtin.command:
+        argv:
+          - aws
+          - s3api
+          - list-objects-v2
+          - --region
+          - "{{ aws_region }}"
+          - --bucket
+          - "{{ backup_bucket }}"
+          - --prefix
+          - mysql/
+          - --query
+          # only finished dumps: *.partial objects are uploads that never completed
+          - "sort_by(Contents[?ends_with(Key, '.sql.gz')], &LastModified)[-1].Key"
+          - --output
+          - text
+      register: backup_latest
+      changed_when: false
+
+    - name: Report the backup
+      ansible.builtin.debug:
+        msg: "latest dump: s3://{{ backup_bucket }}/{{ backup_latest.stdout }}"
+
+    - name: Restore drill
+      when: backup_restore_drill | bool
+      block:
+        - name: Record the drill start
+          ansible.builtin.set_fact:
+            backup_drill_started: "{{ now(utc=true).timestamp() }}"
+
+        # $MYSQL_ROOT_PASSWORD is expanded by sh INSIDE the mysql container (from mysql.env).
+        - name: Create the scratch database
+          ansible.builtin.command:
+            argv: "{{ backup_mysql_exec + [backup_sql] }}"
+          vars:
+            backup_sql: >-
+              mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE IF NOT EXISTS {{ backup_drill_db }}"
+          environment: "{{ backup_compose_env }}"
+          changed_when: true
+
+        - name: Restore the newest dump into the scratch database
+          ansible.builtin.command:
+            argv:
+              - "{{ app_dir }}/backup-mysql-to-s3.sh"
+              - restore
+              - "s3://{{ backup_bucket }}/{{ backup_latest.stdout }}"
+          environment:
+            APP_DIR: "{{ app_dir }}"
+            BACKUP_BUCKET: "{{ backup_bucket }}"
+            DB_NAME: "{{ backup_drill_db }}"
+            AWS_REGION: "{{ aws_region }}"
+          changed_when: true
+
+        - name: Count rows in the live and the restored database
+          ansible.builtin.command:
+            argv: "{{ backup_mysql_exec + [backup_sql] }}"
+          vars:
+            backup_sql: >-
+              mysql -N -B -uroot -p"$MYSQL_ROOT_PASSWORD" -e
+              "SELECT (SELECT COUNT(*) FROM {{ backup_db_name }}.migrations), (SELECT COUNT(*) FROM {{ backup_drill_db }}.migrations)"
+          environment: "{{ backup_compose_env }}"
+          register: backup_counts
+          changed_when: false
+
+        - name: Verify the restore
+          ansible.builtin.assert:
+            that:
+              - backup_counts.stdout.split() | length == 2
+              - backup_counts.stdout.split()[1] | int > 0
+              - backup_counts.stdout.split()[0] == backup_counts.stdout.split()[1]
+            fail_msg: "Restore drill FAILED: live/restored migrations rows = {{ backup_counts.stdout }}"
+            success_msg: >-
+              Restore drill passed in {{ (now(utc=true).timestamp() - backup_drill_started | float) | round(1) }}s
+              (migrations rows live/restored = {{ backup_counts.stdout.split() | join('/') }})
+      always:
+        - name: Drop the scratch database
+          ansible.builtin.command:
+            argv: "{{ backup_mysql_exec + [backup_sql] }}"
+          vars:
+            backup_sql: >-
+              mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "DROP DATABASE IF EXISTS {{ backup_drill_db }}"
+          environment: "{{ backup_compose_env }}"
+          changed_when: true

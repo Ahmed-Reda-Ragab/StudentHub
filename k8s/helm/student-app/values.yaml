@@ -1,0 +1,307 @@
+# student-app chart — defaults shared by every environment.
+# Environment files layer on top:  -f values-kind.yaml  |  -f values-eks.yaml
+# Contract: docs/devops/CONVENTIONS.md (§2 container, §3 endpoints, §4 env, §8 Kubernetes).
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: student-app
+  # Immutable git short SHA. Empty → Chart.appVersion. "latest" fails the render.
+  # Always pass it as a string: --set-string image.tag=3f2c1ab
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Ignored when autoscaling.enabled=true (the HPA owns replicas; the field is then omitted so
+# `helm upgrade` / Argo CD never fight the HPA).
+replicaCount: 2
+revisionHistoryLimit: 5
+# A release that never gets Ready is marked failed after this (Deployment: ProgressDeadlineExceeded,
+# Rollout: aborted automatically → stable keeps serving). Scenario 68 drills.
+progressDeadlineSeconds: 300
+
+# Deployment strategy (rollout.enabled=false). maxUnavailable 0 = never below desired capacity.
+rollingUpdate:
+  maxSurge: 1
+  maxUnavailable: 0
+
+# ---------------------------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------------------------
+
+# Environment-scoped, non-secret config → ConfigMap (envFrom). `KEY: null` in an environment file
+# removes a default. Do not put APP_VERSION here: it is baked into the image.
+config:
+  APP_NAME: "Students Subscriptions"
+  APP_ENV: production
+  APP_DEBUG: "false"
+  APP_URL: http://localhost:8080
+  APP_TIMEZONE: Africa/Cairo
+  APP_LOCALE: ar
+  DB_CONNECTION: mysql
+  DB_PORT: "3306"
+  DB_DATABASE: student_app
+  DB_USERNAME: student
+  SESSION_DRIVER: database
+  CACHE_STORE: database
+  QUEUE_CONNECTION: sync
+  LOG_LEVEL: info
+  SRE_LAB_ENABLED: "true"
+  METRICS_ENABLED: "true"
+  LOADTEST_USERS: "20"
+  LOADTEST_STUDENTS_PER_USER: "100"
+
+# Release-scoped values → pod template env (see _helpers.tpl "student-app.releaseEnv" for why they
+# are not in the ConfigMap). DEPLOY_COLOR shows up in /ready, /sre-lab/version, student_app_app_info.
+deployColor: none
+# "Bad release" knobs (CONVENTIONS §3). Only active when SRE_LAB_ENABLED=true (except bootFail).
+faults:
+  errorRate: "0"      # SRE_FAULT_ERROR_RATE  0..1 of web pages answer 500 → caught by canary analysis
+  latencyMs: "0"      # SRE_FAULT_LATENCY_MS  extra latency on web pages
+  unhealthy: false    # SRE_FAULT_UNHEALTHY   /up 500 + /ready 503 → probes stop the rollout
+  bootFail: false     # SRE_FAULT_BOOT_FAIL   container exits at boot → CrashLoopBackOff
+
+# Free-form env with the highest precedence (beats ConfigMap and Secret). Simulate a bad release:
+#   helm upgrade ... --set extraEnv.SRE_FAULT_ERROR_RATE=0.5
+extraEnv: {}
+
+# Secret with APP_KEY, DB_PASSWORD, ... (kubectl on kind, External Secrets on EKS).
+existingSecret: student-app-secrets
+
+# ---------------------------------------------------------------------------------------------
+# Pod
+# ---------------------------------------------------------------------------------------------
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 82          # www-data on Alpine (serversideup/php)
+  runAsGroup: 82
+  fsGroup: 82
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  # S6-overlay + nginx write to /run, /etc, /tmp at boot; read-only root needs emptyDir mounts first.
+  readOnlyRootFilesystem: false
+
+probes:
+  startup:
+    path: /up
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 45    # up to 90 s for the first boot
+  liveness:
+    path: /up
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    path: /ready
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 2
+
+preStopSleepSeconds: 10
+terminationGracePeriodSeconds: 40
+
+topologySpread:
+  enabled: true
+  # ScheduleAnyway = never block a rollout on a small cluster; DoNotSchedule = hard HA guarantee.
+  whenUnsatisfiable: ScheduleAnyway
+
+podLabels: {}
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  # e.g. nothing for Pod Identity (association is made on the AWS side), or eks.amazonaws.com/role-arn for IRSA.
+  annotations: {}
+
+metrics:
+  # prometheus.io/* pod annotations (annotation-based scraping, used on kind).
+  podAnnotations: true
+
+# ---------------------------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------------------------
+
+service:
+  type: ClusterIP
+  port: 80
+  # Only for type NodePort (kind: 30080 → localhost:8088).
+  nodePort: null
+  annotations: {}
+
+ingress:
+  enabled: false
+  # alb (AWS Load Balancer Controller) or nginx / any other IngressClass.
+  className: alb
+  host: ""
+  annotations: {}
+  # alb only: paths the ALB answers 404 itself (never reach a pod). CONVENTIONS §3: /metrics is internal.
+  blockPaths:
+    - /metrics
+  tls: []
+
+networkPolicy:
+  enabled: true
+  # Who may reach port 8080. Empty = anyone (ALB target-type ip, NodePort, kubelet probes, Prometheus).
+  ingressFrom: []
+  # Database / cache egress: ports, and destination peers (empty = any IP on those ports).
+  databasePorts: [3306, 6379]
+  databaseTo: []
+  extraEgress: []
+
+# ---------------------------------------------------------------------------------------------
+# Scaling & availability
+# ---------------------------------------------------------------------------------------------
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+
+pdb:
+  enabled: true
+  maxUnavailable: 1
+
+# ---------------------------------------------------------------------------------------------
+# Migrations (Helm hook Job, CONVENTIONS §2/§8)
+# ---------------------------------------------------------------------------------------------
+
+migrations:
+  enabled: true
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+# ---------------------------------------------------------------------------------------------
+# Secrets from SSM Parameter Store (External Secrets Operator, external-secrets.io/v1)
+# ---------------------------------------------------------------------------------------------
+
+externalSecrets:
+  enabled: false
+  refreshInterval: 1h
+  # Every parameter under this path becomes one key of existingSecret (CONVENTIONS §4).
+  ssmPath: /student-app/lab/app
+  store:
+    # Create the store from this chart (ClusterSecretStore, usable only from the release namespace).
+    # Set false if the platform (Terraform) already provides one, and point kind/name at it.
+    create: false
+    kind: ClusterSecretStore
+    name: aws-parameter-store
+    region: us-east-1
+
+# ---------------------------------------------------------------------------------------------
+# Progressive delivery (Argo Rollouts) — scenarios 67–68
+# ---------------------------------------------------------------------------------------------
+
+rollout:
+  # false → apps/v1 Deployment (RollingUpdate). true → argoproj.io/v1alpha1 Rollout, same pod template.
+  # Switching an existing release recreates the pods once (Deployment deleted, Rollout created);
+  # for a zero-downtime migration use Rollout.spec.workloadRef instead.
+  enabled: false
+  strategy: canary          # canary | blueGreen
+  canary:
+    maxSurge: 1
+    maxUnavailable: 0
+    # Without traffic routing, weights are approximated with replica counts (1 of 2 pods = 50%).
+    steps:
+      - setWeight: 10
+      - pause: {duration: 2m}
+      - setWeight: 25
+      - pause: {duration: 2m}
+      - setWeight: 50
+      - pause: {duration: 5m}
+    # Background analysis (Prometheus error rate of the canary pods) from this step until 100%.
+    analysis:
+      enabled: true
+      startingStep: 1
+    trafficRouting:
+      # Exact weights at the ALB (needs ingress.enabled with className alb): Argo Rollouts writes the
+      # forward action into the Ingress; the Service "<fullname>" is stable, "<fullname>-canary" canary.
+      alb:
+        enabled: false
+    # After an abort, keep the canary pods this long (time to look at them) before scaling down.
+    abortScaleDownDelaySeconds: 30
+  blueGreen:
+    # Preview stack gets no user traffic until someone runs `kubectl argo rollouts promote`.
+    autoPromotionEnabled: false
+    # Old (blue) pods stay up after the switch: instant rollback window + time for clients to drain.
+    scaleDownDelaySeconds: 30
+    previewReplicaCount: null
+    prePromotionAnalysis:
+      enabled: true          # web provider: preview Service /ready must answer status=ready
+    postPromotionAnalysis:
+      enabled: false         # Prometheus error rate of the new active pods
+
+analysis:
+  prometheus:
+    address: http://prometheus-server.monitoring.svc.cluster.local
+    timeout: 10              # seconds
+  interval: 30s
+  initialDelay: ""
+  # Canary fails when its 5xx ratio on app routes is above this. The SLO budget is 0.5% (99.5%);
+  # 5% is the "obviously broken release" gate that a short canary can measure reliably.
+  maxErrorRate: 0.05
+  # Analysis fails after failureLimit+1 bad measurements.
+  failureLimit: 1
+  rateWindow: 2m
+  web:
+    count: 3
+    interval: 10s
+
+# ---------------------------------------------------------------------------------------------
+# Observability
+# ---------------------------------------------------------------------------------------------
+
+serviceMonitor:
+  # Prometheus Operator (kube-prometheus-stack). Scrapes a dedicated headless Service whose selector
+  # Argo Rollouts never touches, so canary AND stable pods are both scraped.
+  # Keep it OFF when observability/k8s/kube-prometheus-stack-values.yaml is used: its PodMonitor
+  # already scrapes these pods (job="student-app") and both together double-count every request.
+  # The pod contract it relies on: label app.kubernetes.io/name=student-app, container port "http".
+  enabled: false
+  interval: 15s
+  scrapeTimeout: 10s
+  # kube-prometheus-stack only picks up ServiceMonitors with its release label by default.
+  labels:
+    release: kube-prometheus-stack
+  # Key in existingSecret holding METRICS_TOKEN (Bearer auth for /metrics); empty = no auth.
+  bearerTokenSecretKey: ""

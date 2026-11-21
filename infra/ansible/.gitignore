@@ -1,0 +1,10 @@
+# Never commit secrets or local inventories.
+.vault-pass*
+*.retry
+inventories/*/hosts.ini
+# Lab choice: secrets live in SSM; the vault file is only the opt-in alternative (app_env_source=vault).
+# An encrypted vault.yml is safe to commit in a real repo - keep it out here so nobody pushes a
+# plaintext copy by accident before running `ansible-vault encrypt`.
+inventories/*/group_vars/all/vault.yml
+.ansible/
+collections/

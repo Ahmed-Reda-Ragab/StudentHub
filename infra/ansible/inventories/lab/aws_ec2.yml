@@ -1,0 +1,49 @@
+---
+# Dynamic inventory: every running instance tagged Project=student-app (CONVENTIONS §1, §7).
+#   ansible-inventory --graph                 # uses the AWS credentials of your shell
+#   ansible-inventory --host i-0123456789abcdef0
+#
+# Tags written by Terraform:
+#   stack 20 (single host)  Project, Env, ManagedBy, Scenario=20, Role=app
+#   stack 40 (ASG fleet)    Project, Env, ManagedBy, Scenario=40, Role=app, Color=blue|green
+#                           + aws:autoscaling:groupName (added by the ASG itself)
+plugin: amazon.aws.aws_ec2
+regions:
+  - us-east-1   # CONVENTIONS default region; add more if you deploy elsewhere
+filters:
+  tag:Project: student-app
+  instance-state-name: running
+
+# inventory_hostname = instance id: unique, stable and exactly what SSM needs as its target.
+# A Name tag or a public DNS name can change (stop/start, EIP moves); an instance id never does.
+hostnames:
+  - instance-id
+
+compose:
+  # SSH (deploy_connection=ssh) connects to ansible_host: the public DNS name when the instance
+  # has one (stack 20 EIP / public subnets), otherwise the private IP (VPN / bastion).
+  ansible_host: public_dns_name | default(private_ip_address, true)
+  # SSM (deploy_connection=ssm) ignores ansible_host and opens a session to this id.
+  ansible_aws_ssm_instance_id: instance_id
+
+keyed_groups:
+  # tag Role=app -> group role_app (every playbook targets it)
+  - key: tags.Role
+    prefix: role
+  - key: tags.Env
+    prefix: env
+  - key: tags.Scenario
+    prefix: scenario
+  - key: tags.Color
+    prefix: color
+  - key: placement.availability_zone
+    prefix: az
+
+groups:
+  # Mutable single hosts (stack 20) vs immutable ASG members (stack 40). The default host patterns of
+  # the playbooks keep the two apart: deploy.yml never touches an ASG instance by accident, and
+  # rolling-asg.yml never touches the single host.
+  standalone: "'aws:autoscaling:groupName' not in tags"
+  in_asg: "'aws:autoscaling:groupName' in tags"
+
+strict: false

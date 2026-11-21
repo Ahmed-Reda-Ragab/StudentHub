@@ -1,0 +1,5 @@
+# Build output (AMI ids are per-account; read them from manifest.json locally)
+manifest.json
+*.auto.pkrvars.hcl
+packer_cache/
+crash.log

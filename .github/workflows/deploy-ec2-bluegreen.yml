@@ -1,0 +1,54 @@
+# Blue/Green on the single EC2 host, automated (scenario 23).
+#
+# Runs /opt/student-app/lb/bin/bluegreen.sh <image> through SSM Run Command (engine:
+# deploy-ec2-ssm.yml): the new image starts on the IDLE color, migrates, passes /ready + smoke,
+# then nginx switches 100% of traffic in one graceful reload. The old color keeps running, so a
+# rollback is one more nginx reload (lb/bin/rollback.sh). First run on a host = init.sh.
+# A probe from the runner records availability during the switch: it must stay at 100%.
+#
+# Drill: slot_env=SRE_FAULT_UNHEALTHY=true -> the new color never becomes ready, traffic never moves.
+name: Deploy EC2 blue/green (SSM)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag in ECR (git short SHA). Empty = this commit's short SHA."
+        type: string
+        default: ""
+      keep_old:
+        description: "Keep the old color running (instant rollback). Untick to stop it after draining."
+        type: boolean
+        default: true
+      drain_seconds:
+        description: "Seconds to drain the old color before stopping it (when keep_old is off)."
+        type: string
+        default: "10"
+      slot_env:
+        description: "Drill only: extra env for the NEW color, e.g. SRE_FAULT_UNHEALTHY=true"
+        type: string
+        default: ""
+      use_local_mysql:
+        description: "MySQL runs as a container on the host (stack 20). Untick when DB_HOST is RDS."
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  bluegreen:
+    # No concurrency here: the called job holds the per-host deploy lock (a caller using the
+    # same group would deadlock with it).
+    uses: ./.github/workflows/deploy-ec2-ssm.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      environment: lab
+      strategy: bluegreen
+      image_tag: ${{ inputs.image_tag }}
+      keep_old: ${{ inputs.keep_old }}
+      drain_seconds: ${{ inputs.drain_seconds }}
+      slot_env: ${{ inputs.slot_env }}
+      use_local_mysql: ${{ inputs.use_local_mysql }}

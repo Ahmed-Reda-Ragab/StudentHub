@@ -1,0 +1,51 @@
+# AnalysisTemplate: canary error rate from Prometheus (scenarios 67–68).
+#
+# Verdict = 5xx ratio of the NEW pods only, on app routes only:
+#   * pod=~".+-<hash>-.+" = pods of the canary ReplicaSet (Argo passes the hash: podTemplateHashValue:
+#     Latest; Rollout pods are named <rollout>-<hash>-<suffix>). The `pod` label is set by every scrape
+#     setup (annotation job, PodMonitor, ServiceMonitor), so no hash-label relabelling is needed.
+#   * probes, /metrics and /sre-lab/* are excluded — same definition as the availability SLI (CONVENTIONS §5).
+# A bad release made with SRE_FAULT_ERROR_RATE keeps passing every health check; this is the only gate
+# that catches it.
+#
+# Used by canary.yaml (background analysis) and bluegreen.yaml (post-promotion).
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: error-rate
+  namespace: student-app
+  labels:
+    app.kubernetes.io/part-of: student-app-lab
+spec:
+  args:
+    - name: namespace
+      value: student-app
+    - name: canary-hash
+    # kube-prometheus-stack: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+    # prometheus-community/prometheus (kind): http://prometheus-server.monitoring.svc.cluster.local
+    - name: prometheus-address
+      value: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+  metrics:
+    - name: error-rate
+      # One measurement per minute over a 2-minute window; the third bad minute aborts the rollout.
+      interval: 1m
+      failureLimit: 2
+      # 5% = "obviously broken release". The SLO budget is 0.5%, too small to judge on a few minutes of
+      # canary traffic — burn-rate alerts (observability/) guard the SLO itself.
+      # NaN = 0/0, no canary traffic in the window: nothing to judge yet.
+      successCondition: "isNaN(result[0]) || result[0] <= 0.05"
+      # Fail closed: no series at all (scraping broken) = empty result = Error → 5 in a row abort.
+      consecutiveErrorLimit: 4
+      provider:
+        prometheus:
+          address: "{{args.prometheus-address}}"
+          timeout: 10
+          # `errors or 0 * total`: a fresh canary has no 5xx series → 0 errors; no series at all → empty.
+          query: |
+            (
+              sum(rate(student_app_http_requests_total{namespace="{{args.namespace}}", pod=~".+-{{args.canary-hash}}-.+", status=~"5..", route!~"sre-lab\\..*|health\\.ready|up|metrics"}[2m]))
+              or
+              0 * sum(rate(student_app_http_requests_total{namespace="{{args.namespace}}", pod=~".+-{{args.canary-hash}}-.+", route!~"sre-lab\\..*|health\\.ready|up|metrics"}[2m]))
+            )
+            /
+            sum(rate(student_app_http_requests_total{namespace="{{args.namespace}}", pod=~".+-{{args.canary-hash}}-.+", route!~"sre-lab\\..*|health\\.ready|up|metrics"}[2m]))

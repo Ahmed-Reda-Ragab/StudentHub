@@ -1,0 +1,31 @@
+# kind cluster for the Kubernetes scenarios (60–64 locally, and .github/workflows/k8s-integration.yml).
+#
+#   kind create cluster --config k8s/kind/cluster.yaml
+#   kind load docker-image student-app:ci-v1 --name student-app-lab
+#
+# 1 control-plane + 2 workers: lets topologySpreadConstraints, PDBs and node drains behave
+# like a real (small) cluster. The node image is pinned by digest (kind's own recommendation):
+# v1.36 is inside the EKS standard-support window, so what passes here behaves the same on EKS.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: student-app-lab
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+    # NodePort 30080 (the app Service in values-kind.yaml / overlays/kind) is published on the
+    # host as localhost:8088, so probe.sh / k6 / curl on the runner hit the app the same way a
+    # user would: host → node → kube-proxy → a Ready pod. 127.0.0.1 only: never expose it on the LAN.
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 8088
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+  - role: worker
+    image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+    labels:
+      topology.kubernetes.io/zone: lab-a
+  - role: worker
+    image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+    # Fake zones so the zone spread constraint has something to spread over (like 2 AZs on EKS).
+    labels:
+      topology.kubernetes.io/zone: lab-b

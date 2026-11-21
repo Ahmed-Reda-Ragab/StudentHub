@@ -1,0 +1,82 @@
+# Alertmanager — routes SLO alerts by severity (scenarios 71/73/76).
+#
+#   page    → someone acts NOW   → webhook (PagerDuty / Opsgenie / Slack / Teams in real life)
+#   ticket  → fix this week       → email (or a ticket-creating webhook: Jira, GitHub Issues)
+#   drill="true" → game-day alerts from loadtest/k6/error-budget-burn.js, never the real pager
+#
+# Placeholders: the webhook points at the lab's `alert-sink` container (it just logs every
+# notification: `docker compose -f observability/compose/docker-compose.yml logs -f alert-sink`); replace the URL / SMTP
+# settings with real ones. Keep secrets out of git: use *_file fields (e.g. smtp_auth_password_file,
+# webhook url_file) mounted from a secret.
+#
+#   amtool check-config observability/prometheus/alertmanager.yml
+
+global:
+  resolve_timeout: 5m
+  # Email placeholders (amtool needs a smarthost + from for email receivers to be valid).
+  smtp_smarthost: "smtp.example.com:587"
+  smtp_from: "alertmanager@student-app.example.com"
+  smtp_require_tls: true
+  # smtp_auth_username: "alertmanager@student-app.example.com"
+  # smtp_auth_password_file: /etc/alertmanager/secrets/smtp_password
+
+route:
+  receiver: default
+  # One notification per SLO per service, not one per rule window.
+  group_by: ["alertname", "job", "slo"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Game days first: drill alerts go to their own channel, then stop.
+    - receiver: drill
+      matchers: ['drill="true"']
+      continue: false
+    - receiver: pager
+      matchers: ['severity="page"']
+      group_wait: 10s
+      repeat_interval: 1h
+    - receiver: tickets
+      matchers: ['severity="ticket"']
+      group_wait: 5m
+      repeat_interval: 24h
+
+inhibit_rules:
+  # A fast burn already pages: silence the slower windows of the same SLO meanwhile.
+  - source_matchers: ['burn="fast"']
+    target_matchers: ['burn=~"slow|budget"']
+    equal: ["job", "slo"]
+  - source_matchers: ['burn="slow"']
+    target_matchers: ['burn="budget"']
+    equal: ["job", "slo"]
+  # Nothing can be scraped → SLO alerts are meaningless noise on top of the outage page.
+  - source_matchers: ['alertname="StudentAppNoTargetsUp"']
+    target_matchers: ['slo=~".+"']
+    equal: ["job"]
+
+receivers:
+  - name: default
+    webhook_configs:
+      - url: "http://alert-sink:8080/default"
+        send_resolved: true
+
+  - name: pager
+    webhook_configs:
+      # Placeholder: PagerDuty/Opsgenie have native configs (pagerduty_configs, opsgenie_configs);
+      # Slack: slack_configs with api_url_file.
+      - url: "http://alert-sink:8080/page"
+        send_resolved: true
+        max_alerts: 20
+
+  - name: tickets
+    email_configs:
+      - to: "student-app-oncall@example.com"
+        send_resolved: true
+    webhook_configs:
+      - url: "http://alert-sink:8080/ticket"
+        send_resolved: true
+
+  - name: drill
+    webhook_configs:
+      - url: "http://alert-sink:8080/drill"
+        send_resolved: true

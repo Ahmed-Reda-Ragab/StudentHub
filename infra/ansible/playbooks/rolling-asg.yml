@@ -1,0 +1,268 @@
+---
+# Rolling deploy with Ansible across the ASG fleet behind the ALB (scenario 47).
+# The in-place alternative to an instance refresh (scenario 44): same image, but Ansible drives
+# the order - one instance at a time: drain -> deploy -> health-gate -> back into the pool.
+#
+#   cd infra/ansible
+#   TG=$(terraform -chdir=../terraform/stacks/40-ec2-alb-asg output -json target_group_arns)
+#   ansible-playbook playbooks/rolling-asg.yml \
+#     -e app_image=123456789012.dkr.ecr.us-east-1.amazonaws.com/student-app:3f2c1ab \
+#     -e "{\"rolling_target_group_arns\": $TG}" -e ssm_bucket_name=<any bucket you can write>
+#
+# Runs with YOUR credentials (WSL): it needs elasticloadbalancing:(De)RegisterTargets,
+# autoscaling:Suspend/ResumeProcesses and ssm:StartSession, which the CI deploy role does not have.
+# ASG members only expose port 80 to the ALB, so the connection is SSM (group_vars default).
+#
+# The container spec mirrors infra/terraform/modules/asg-app/user-data.sh.tftpl (docker run
+# --name student-app -p 80:8080 ...): a later scale-out boots the same thing from the SSM pointer.
+
+- name: Prepare the rolling deploy
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    rolling_hosts: "{{ query('ansible.builtin.inventory_hostnames', target_hosts | default('role_app:&in_asg')) }}"
+  tasks:
+    - name: Validate inputs
+      ansible.builtin.assert:
+        that:
+          - app_image | length > 0
+          - app_image is not search(':latest$')
+          - rolling_hosts | length > 0
+          - rolling_target_group_arns is defined or rolling_target_group_arn is defined
+        fail_msg: >-
+          Need -e app_image=<immutable image>, at least one ASG instance in the inventory and
+          rolling_target_group_arns (terraform output -json target_group_arns).
+        quiet: true
+
+    - name: Find the ASGs being rolled
+      ansible.builtin.set_fact:
+        rolling_asg_names: >-
+          {{ rolling_hosts | map('extract', hostvars) | map(attribute='tags', default={})
+             | map(attribute='aws:autoscaling:groupName', default='') | select | unique | list }}
+
+    # Without this the ASG fights the deploy: HealthCheck could mark the drained instance unhealthy
+    # (and ReplaceUnhealthy would terminate it mid-deploy, or right after resume), AZRebalance /
+    # scaling alarms / schedules could add or remove instances while we count them.
+    - name: Suspend ASG processes that would interfere
+      ansible.builtin.command:
+        argv:
+          - aws
+          - autoscaling
+          - suspend-processes
+          - --region
+          - "{{ aws_region }}"
+          - --auto-scaling-group-name
+          - "{{ item }}"
+          - --scaling-processes
+          - HealthCheck
+          - ReplaceUnhealthy
+          - AZRebalance
+          - AlarmNotification
+          - ScheduledActions
+      loop: "{{ rolling_asg_names }}"
+      changed_when: true
+
+- name: Run database migrations once for the new release
+  hosts: "{{ target_hosts | default('role_app:&in_asg') }}"
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Log in to ECR with the instance role
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          aws ecr get-login-password --region "{{ aws_region }}" \
+            | docker login --username AWS --password-stdin "{{ app_image.split('/')[0] }}" >/dev/null
+        executable: /bin/bash
+      changed_when: false
+      run_once: true
+      when: rolling_run_migrations | default(true) | bool
+
+    # CONVENTIONS §2: migrations run ONCE per release, with the NEW image, before any instance
+    # serves it. They must be backward compatible (expand/contract, scenario 95): old instances
+    # keep serving on the new schema until the roll completes.
+    - name: Migrate with the new image
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --env-file
+          - "{{ app_dir }}/app.env"
+          - "{{ app_image }}"
+          - php
+          - artisan
+          - migrate
+          - --force
+      register: rolling_migrate
+      changed_when: "'Nothing to migrate' not in rolling_migrate.stdout"
+      run_once: true
+      when: rolling_run_migrations | default(true) | bool
+
+- name: Roll the release, one instance at a time
+  hosts: "{{ target_hosts | default('role_app:&in_asg') }}"
+  become: true
+  gather_facts: false
+  # serial: 1 = never more than one instance out of the pool (N-1 capacity during the roll).
+  serial: 1
+  # any_errors_fatal: the first failure stops the whole play at once - no second instance is
+  # touched, the failed one stays OUT of the target group (it never serves the bad release).
+  # max_fail_percentage: 0 says the same per batch; kept explicit because with a larger serial
+  # (e.g. "25%") it is the knob that decides how much failure a batch may absorb.
+  any_errors_fatal: true
+  max_fail_percentage: 0
+  vars:
+    rolling_instance_id: "{{ instance_id | default(ansible_aws_ssm_instance_id) | default(inventory_hostname) }}"
+    rolling_color: "{{ tags.Color | default('blue') }}"
+    rolling_tg_arn: >-
+      {{ rolling_target_group_arn if rolling_target_group_arn is defined else rolling_target_group_arns[rolling_color] }}
+    rolling_drain_timeout: 90       # ALB deregistration_delay is 30s in modules/alb
+    rolling_healthy_timeout: 300    # health check grace + /ready passing threshold
+    rolling_log_group: "/{{ project }}/{{ env_name }}/app"   # aws_cloudwatch_log_group.app in stack 40
+
+  pre_tasks:
+    - name: Inspect the running app container
+      community.docker.docker_container_info:
+        name: student-app
+      register: rolling_container
+
+    # Idempotent re-runs: an instance already on this image is not drained again.
+    - name: Skip instances that already run this release
+      ansible.builtin.meta: end_host
+      when:
+        - rolling_container.exists
+        - rolling_container.container.Config.Image == app_image
+        - rolling_container.container.State.Running
+
+    - name: Take the instance out of the target group and wait for draining
+      community.aws.elb_target:
+        region: "{{ aws_region }}"
+        target_group_arn: "{{ rolling_tg_arn }}"
+        target_id: "{{ rolling_instance_id }}"
+        state: absent
+        # "unused" = deregistration finished: in-flight requests completed (or delay expired).
+        target_status: unused
+        target_status_timeout: "{{ rolling_drain_timeout }}"
+      delegate_to: localhost
+      become: false
+
+  tasks:
+    - name: Log in to ECR with the instance role
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          aws ecr get-login-password --region "{{ aws_region }}" \
+            | docker login --username AWS --password-stdin "{{ app_image.split('/')[0] }}" >/dev/null
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Pull {{ app_image }}
+      community.docker.docker_image_pull:
+        name: "{{ app_image }}"
+        pull: not_present
+
+    - name: Replace the app container
+      community.docker.docker_container:
+        name: student-app
+        image: "{{ app_image }}"
+        published_ports:
+          - "80:8080"
+        env_file: "{{ app_dir }}/app.env"
+        env:
+          DEPLOY_COLOR: "{{ rolling_color }}"
+        stop_signal: SIGQUIT       # graceful PHP-FPM shutdown (CONVENTIONS §2)
+        stop_timeout: 30
+        restart_policy: unless-stopped
+        log_driver: awslogs
+        log_options:
+          awslogs-group: "{{ rolling_log_group }}"
+          awslogs-region: "{{ aws_region }}"
+          awslogs-stream: "{{ rolling_color }}/{{ rolling_instance_id }}"
+        state: started
+
+    - name: Record the release on the instance
+      ansible.builtin.copy:
+        content: "{{ app_image }}\n"
+        dest: "{{ app_dir }}/CURRENT_RELEASE"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Wait until the new container is ready
+      ansible.builtin.uri:
+        url: http://127.0.0.1/ready
+        return_content: true
+      register: rolling_ready
+      until: rolling_ready.json is defined and rolling_ready.json.status | default('') == 'ready'
+      retries: 30
+      delay: 3
+
+  post_tasks:
+    - name: Put the instance back into the target group
+      community.aws.elb_target:
+        region: "{{ aws_region }}"
+        target_group_arn: "{{ rolling_tg_arn }}"
+        target_id: "{{ rolling_instance_id }}"
+        state: present
+      delegate_to: localhost
+      become: false
+
+    # Health gate: the ALB itself must see /ready pass before the next instance is drained.
+    - name: Wait until the ALB reports the target in service
+      ansible.builtin.command:
+        argv:
+          - aws
+          - elbv2
+          - wait
+          - target-in-service
+          - --region
+          - "{{ aws_region }}"
+          - --target-group-arn
+          - "{{ rolling_tg_arn }}"
+          - --targets
+          - "Id={{ rolling_instance_id }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      timeout: "{{ rolling_healthy_timeout }}"
+
+- name: Publish the release for future instances
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    rolling_hosts: "{{ query('ansible.builtin.inventory_hostnames', target_hosts | default('role_app:&in_asg')) }}"
+    rolling_colors: >-
+      {{ rolling_hosts | map('extract', hostvars) | map(attribute='tags', default={})
+         | map(attribute='Color', default='blue') | unique | list }}
+  tasks:
+    # Only after every instance passed: a failed roll never becomes what new instances boot.
+    - name: Point the boot-time release parameter at the new image
+      community.aws.ssm_parameter:
+        region: "{{ aws_region }}"
+        name: "{{ ssm_prefix }}/deploy/{{ item }}/IMAGE_URI"
+        value: "{{ app_image }}"
+        string_type: String
+        overwrite_value: changed
+      loop: "{{ rolling_colors }}"
+
+    - name: Resume the suspended ASG processes
+      ansible.builtin.command:
+        argv:
+          - aws
+          - autoscaling
+          - resume-processes
+          - --region
+          - "{{ aws_region }}"
+          - --auto-scaling-group-name
+          - "{{ item }}"
+          - --scaling-processes
+          - HealthCheck
+          - ReplaceUnhealthy
+          - AZRebalance
+          - AlarmNotification
+          - ScheduledActions
+      loop: "{{ rolling_asg_names }}"
+      changed_when: true

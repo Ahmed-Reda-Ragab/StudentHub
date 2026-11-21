@@ -1,0 +1,46 @@
+# Internet-facing ALB managed by the AWS Load Balancer Controller (scenario 63).
+# target-type ip: the ALB sends traffic straight to pod IPs (no NodePort hop, no kube-proxy), and
+# health-checks every pod on /ready — the same signal as the readiness probe.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: student-app
+  labels:
+    app.kubernetes.io/name: student-app
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-name: student-app-lab-eks
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /ready
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "10"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "2"
+    # In-flight requests get 30 s to finish after a pod is deregistered (matches PHP-FPM's graceful stop).
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+    alb.ingress.kubernetes.io/tags: Project=student-app,Env=lab,ManagedBy=kubernetes,Scenario=63
+    # /metrics is for Prometheus inside the cluster only (CONVENTIONS §3): the ALB answers 404 itself.
+    alb.ingress.kubernetes.io/actions.block-metrics: >-
+      {"type":"fixed-response","fixedResponseConfig":{"contentType":"text/plain","statusCode":"404","messageBody":"Not Found"}}
+    # For HTTPS add: alb.ingress.kubernetes.io/certificate-arn, listen-ports [{"HTTP":80},{"HTTPS":443}], ssl-redirect "443".
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          # Rules are evaluated in order: the exact /metrics block must come before the catch-all.
+          - path: /metrics
+            pathType: Exact
+            backend:
+              service:
+                name: block-metrics
+                port:
+                  name: use-annotation
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: student-app
+                port:
+                  name: http

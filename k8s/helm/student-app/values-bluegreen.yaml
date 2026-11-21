@@ -1,0 +1,23 @@
+# Blue-green with Argo Rollouts (scenario 67). Layer it on an environment file:
+#   kind: helm upgrade --install student-app k8s/helm/student-app -n student-app \
+#           -f k8s/helm/student-app/values-kind.yaml -f k8s/helm/student-app/values-bluegreen.yaml \
+#           --set-string image.tag=ci-v2 --set deployColor=green
+#   EKS : -f values-eks.yaml -f values-bluegreen.yaml   (the ALB Ingress follows the active Service)
+#
+# Flow: new ReplicaSet behind "<fullname>-preview" → prePromotionAnalysis (/ready via the web
+# provider) → waits for a human:  kubectl argo rollouts promote student-app -n student-app
+# → active Service switches in one step → old pods kept scaleDownDelaySeconds for instant rollback
+#   (kubectl argo rollouts undo student-app).
+# Tip: set deployColor per release (blue/green) to see the switch in /ready and student_app_app_info.
+
+rollout:
+  enabled: true
+  strategy: blueGreen
+  blueGreen:
+    autoPromotionEnabled: false
+    scaleDownDelaySeconds: 60
+    prePromotionAnalysis:
+      enabled: true
+    # Needs Prometheus (analysis.prometheus.address) and real traffic on the new active pods.
+    postPromotionAnalysis:
+      enabled: false

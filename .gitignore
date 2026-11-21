@@ -25,3 +25,17 @@ _ide_helper.php
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# DevOps lab runtime state (generated on the host / CI runner)
+/deploy/ec2/lb/state/
+/loadtest/results/
+/docs/devops/pdf/node_modules/
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfplan
+/docs/devops/pdf/build/
+/infra/terraform/backend.hcl
+**/terraform.tfvars
+tfplan
+**/*.auto.tfvars.json

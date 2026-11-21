@@ -2,16 +2,21 @@
 
 namespace App\Providers;
 
+use App\Support\Metrics\RequestMetrics;
 use App\Support\SubscriptionPeriod;
 use App\Support\WhatsApp\WhatsAppLinkBuilder;
 use App\View\Composers\NavigationComposer;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Foundation\Events\DiagnosingHealth;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Date;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\View;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Validation\Rules\Password;
+use Prometheus\CollectorRegistry;
+use RuntimeException;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -29,6 +34,11 @@ class AppServiceProvider extends ServiceProvider
 
         // One instance per request so the bell count is queried once.
         $this->app->scoped(NavigationComposer::class);
+
+        $this->app->singleton(RequestMetrics::class, fn () => new RequestMetrics(
+            new CollectorRegistry(RequestMetrics::storage((string) config('sre_lab.metrics.storage')), false),
+            (string) config('sre_lab.metrics.namespace'),
+        ));
     }
 
     /**
@@ -44,5 +54,12 @@ class AppServiceProvider extends ServiceProvider
         Password::defaults(fn () => Password::min(8));
 
         View::composer('components.layouts.app', NavigationComposer::class);
+
+        // SRE lab "unhealthy release": makes the liveness route (/up) answer 500.
+        Event::listen(DiagnosingHealth::class, function (): void {
+            if (config('sre_lab.enabled') && config('sre_lab.faults.unhealthy')) {
+                throw new RuntimeException('SRE lab fault: SRE_FAULT_UNHEALTHY is set.');
+            }
+        });
     }
 }

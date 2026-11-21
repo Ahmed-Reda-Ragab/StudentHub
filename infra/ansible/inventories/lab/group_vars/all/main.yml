@@ -1,0 +1,65 @@
+---
+# Lab-wide variables (CONVENTIONS §1, §4, §7). Loaded for both inventories in this directory
+# (aws_ec2.yml and hosts.ini). Secrets do NOT go here: they live in SSM Parameter Store
+# (default) or in the ansible-vault file next to this one (vault.yml.example).
+
+project: student-app
+env_name: lab
+aws_region: us-east-1
+ssm_prefix: "/{{ project }}/{{ env_name }}"   # /student-app/lab/{app,mysql,deploy}/...
+
+app_dir: /opt/student-app
+# The release to deploy. Always an immutable tag (git short SHA) - never :latest:
+#   -e app_image=123456789012.dkr.ecr.us-east-1.amazonaws.com/student-app:3f2c1ab
+app_image: ""
+
+# Stack 20 runs MySQL as a container on the host; stack 40 uses RDS (DB_HOST from SSM).
+use_local_mysql: true
+
+# backups bucket of stack 20: terraform output -raw backup_bucket
+backup_bucket: ""
+
+# Repo root, used to copy deploy/ec2/* and docker-compose.prod.yml to the hosts.
+repo_root: "{{ playbook_dir }}/../../.."
+
+# ---------------------------------------------------------------- app.env source
+# ssm   : run deploy/ec2/render-env-from-ssm.sh on the host (instance profile reads /student-app/<env>/*)
+# vault : render app.env from the dicts below; secrets come from vault.yml (vault_* variables)
+app_env_source: ssm
+app_env_vars:
+  APP_ENV: production
+  APP_DEBUG: "false"
+  APP_URL: "http://{{ ansible_host | default(inventory_hostname) }}"
+  APP_KEY: "{{ vault_app_key }}"
+  DB_CONNECTION: mysql
+  DB_HOST: mysql
+  DB_PORT: "3306"
+  DB_DATABASE: student_app
+  DB_USERNAME: student
+  DB_PASSWORD: "{{ vault_db_password }}"
+  SESSION_DRIVER: database
+  CACHE_STORE: database
+  SRE_LAB_ENABLED: "true"
+  SRE_LAB_TOKEN: "{{ vault_sre_lab_token }}"
+  METRICS_ENABLED: "true"
+app_mysql_env_vars:
+  MYSQL_DATABASE: student_app
+  MYSQL_USER: student
+  MYSQL_PASSWORD: "{{ vault_db_password }}"
+  MYSQL_ROOT_PASSWORD: "{{ vault_mysql_root_password }}"
+
+# ---------------------------------------------------------------- connection: ssm | ssh
+# ssm (default): no port 22, no SSH keys, every session is IAM-authorised and logged in CloudTrail.
+#   Needs the session-manager-plugin + boto3 on the controller, and an S3 bucket the
+#   *controller* can write: the plugin moves module files through it with presigned URLs
+#   (the instance only runs curl, it needs no S3 permission). The stack 20 backups bucket works.
+# ssh: the classic way - port 22 open to you (stack 20 var ssh_cidrs) + key_name on the instance.
+deploy_connection: ssm
+ssm_bucket_name: ""   # -e ssm_bucket_name=$(terraform -chdir=../terraform/bootstrap output -raw ansible_ssm_bucket)
+
+ansible_connection: "{{ 'amazon.aws.aws_ssm' if deploy_connection == 'ssm' else 'ansible.builtin.ssh' }}"
+ansible_aws_ssm_region: "{{ aws_region }}"
+ansible_aws_ssm_bucket_name: "{{ ssm_bucket_name }}"
+ansible_aws_ssm_bucket_sse_mode: AES256
+# The implicit localhost (delegate_to: localhost for AWS API calls) keeps ansible_connection=local:
+# its host var wins over this group var.

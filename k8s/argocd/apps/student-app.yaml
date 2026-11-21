@@ -1,0 +1,46 @@
+# The app, as a child of app-of-apps.yaml. Same object as ../application.yaml (see there for the
+# GitOps flow); keep the two in sync or use only one.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: student-app
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: student-app-lab
+  annotations:
+    # After the add-ons (-3/-2): needs the ALB controller webhook, ESO and Argo Rollouts CRDs.
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Ahmed-Reda-Ragab/StudentHub.git
+    targetRevision: master
+    path: k8s/helm/student-app
+    helm:
+      releaseName: student-app
+      valueFiles:
+        - values-eks.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: student-app
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        elbv2.k8s.aws/pod-readiness-gate-inject: enabled
+    syncOptions:
+      - CreateNamespace=true
+      - SkipDryRunOnMissingResource=true
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+  revisionHistoryLimit: 10

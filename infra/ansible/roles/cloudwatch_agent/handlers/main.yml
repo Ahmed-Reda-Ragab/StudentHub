@@ -1,0 +1,14 @@
+---
+# -m ec2: credentials and region from the instance profile / IMDS. -s: (re)start with the new config.
+- name: Load the CloudWatch agent configuration
+  ansible.builtin.command:
+    argv:
+      - /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+      - -a
+      - fetch-config
+      - -m
+      - ec2
+      - -s
+      - -c
+      - "file:{{ cloudwatch_agent_config_path }}"
+  changed_when: true

@@ -1,0 +1,100 @@
+# Single-host zero-downtime stack (scenarios 23 blue/green, 24 canary, 25 rolling, 26 A/B + shadow).
+#
+#   proxy (nginx :80) ──► app_blue  (127.0.0.1:8081)
+#                     └─► app_green (127.0.0.1:8082)
+#   mysql (shared)
+#
+# Never edit images here — the scripts in ./bin keep them in ./state/release.env:
+#   ./bin/init.sh <image>         first start (blue active)
+#   ./bin/bluegreen.sh <image>    deploy to the idle color, test it, switch nginx, keep old for rollback
+#   ./bin/canary.sh <image>       10% → 25% → 50% → 100% with an error-rate gate + auto-abort
+#   ./bin/rolling.sh <image>      replace one slot at a time (both slots serve traffic)
+#   ./bin/ab-test.sh <image> 20   20% of users (sticky cookie) see the new version
+#   ./bin/shadow.sh <image>       mirror GET traffic to the new version (responses discarded)
+#   ./bin/rollback.sh             instant switch back to the previous color
+#
+# Same compose project ("student-app") and same volume as docker-compose.prod.yml,
+# so moving from the Recreate stack to this one keeps the database.
+# With RDS (scenario 41+) set DB_HOST in app.env and USE_LOCAL_MYSQL=false: mysql is never started.
+name: student-app
+
+x-app: &app
+    env_file:
+        - path: ${APP_ENV_FILE:-/opt/student-app/app.env}
+          required: true
+    healthcheck:
+        test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/up || exit 1"]
+        interval: 5s
+        timeout: 3s
+        retries: 12
+        start_period: 20s
+    depends_on:
+        mysql:
+            condition: service_healthy
+            required: false
+    stop_grace_period: 30s
+    restart: unless-stopped
+    logging:
+        driver: json-file
+        options:
+            max-size: "10m"
+            max-file: "3"
+
+services:
+    proxy:
+        image: nginx:1.28-alpine
+        ports:
+            - "${LB_HTTP_PORT:-80}:80"
+        volumes:
+            - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+            - ./state/nginx:/etc/nginx/state:ro
+        healthcheck:
+            test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/lb-health || exit 1"]
+            interval: 5s
+            retries: 6
+        restart: unless-stopped
+
+    app_blue:
+        <<: *app
+        image: ${BLUE_IMAGE:?run bin/init.sh first}
+        env_file:
+            - path: ${APP_ENV_FILE:-/opt/student-app/app.env}
+              required: true
+            - path: ./state/blue.env
+              required: false
+        environment:
+            DEPLOY_COLOR: blue
+        ports:
+            - "127.0.0.1:8081:8080"
+
+    app_green:
+        <<: *app
+        image: ${GREEN_IMAGE:?run bin/init.sh first}
+        env_file:
+            - path: ${APP_ENV_FILE:-/opt/student-app/app.env}
+              required: true
+            - path: ./state/green.env
+              required: false
+        environment:
+            DEPLOY_COLOR: green
+        ports:
+            - "127.0.0.1:8082:8080"
+
+    mysql:
+        image: mysql:8.4
+        command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+        env_file:
+            - path: ${MYSQL_ENV_FILE:-/opt/student-app/mysql.env}
+              required: false   # absent when using RDS
+        volumes:
+            - mysql-data:/var/lib/mysql
+        healthcheck:
+            test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+            interval: 5s
+            timeout: 3s
+            retries: 30
+            start_period: 30s
+        restart: unless-stopped
+
+volumes:
+    mysql-data:

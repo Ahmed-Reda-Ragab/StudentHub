@@ -1,0 +1,151 @@
+# kube-prometheus-stack, sized for a lab cluster (kind / minikube / small EKS) — scenarios 60+/71.
+#
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#     --version <PINNED_CHART_VERSION> --namespace monitoring --create-namespace \
+#     -f observability/k8s/kube-prometheus-stack-values.yaml \
+#     --set grafana.adminPassword="$(openssl rand -base64 18)"
+#   kubectl apply -f observability/k8s/prometheusrule-slo.yaml
+#   kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
+#
+# Pin --version to a chart release you tested (93.x when this was written); the chart's
+# major versions regularly move CRDs and value keys.
+#
+# Our dashboards (observability/grafana/dashboards) use a ${datasource} variable, so the
+# Grafana sidecar can load them unchanged:
+#   kubectl -n monitoring create configmap student-app-dashboards --from-file=observability/grafana/dashboards/
+#   kubectl -n monitoring label configmap student-app-dashboards grafana_dashboard=1
+
+# Control-plane components are not scrapeable on managed clusters (EKS) and often not on
+# kind; leaving them on only produces permanent TargetDown alerts.
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+defaultRules:
+  create: true
+
+alertmanager:
+  alertmanagerSpec:
+    retention: 72h
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
+  # Same routing idea as observability/prometheus/alertmanager.yml, with a null receiver
+  # until you plug in a real webhook / Slack / PagerDuty.
+  config:
+    route:
+      receiver: "null"
+      group_by: ["alertname", "namespace", "job", "slo"]
+      routes:
+        - receiver: "null"
+          matchers: ['alertname="Watchdog"'] # always-firing heartbeat, wire it to a dead-man's switch
+        - receiver: "null"
+          matchers: ['drill="true"']
+        - receiver: "null" # replace with the pager receiver
+          matchers: ['severity="page"']
+        - receiver: "null" # replace with the ticket receiver
+          matchers: ['severity="ticket"']
+    receivers:
+      - name: "null"
+
+grafana:
+  defaultDashboardsTimezone: browser
+  persistence:
+    enabled: false # lab: dashboards come from ConfigMaps, nothing to keep
+  resources:
+    requests: { cpu: 25m, memory: 128Mi }
+    limits: { memory: 256Mi }
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+      folderAnnotation: grafana_folder
+
+kube-state-metrics:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
+prometheus-node-exporter:
+  resources:
+    requests: { cpu: 10m, memory: 24Mi }
+    limits: { memory: 64Mi }
+
+prometheusOperator:
+  resources:
+    requests: { cpu: 25m, memory: 64Mi }
+    limits: { memory: 256Mi }
+
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 15s
+    evaluationInterval: 30s
+    retention: 7d
+    retentionSize: 4GB
+    resources:
+      requests: { cpu: 100m, memory: 512Mi }
+      limits: { memory: 1536Mi }
+    # Pick up ServiceMonitors / PodMonitors / PrometheusRules from ANY namespace and
+    # without the chart's `release` label (the default only sees its own objects).
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    # k6 can push results here: k6 run -o experimental-prometheus-rw
+    # (K6_PROMETHEUS_RW_SERVER_URL=http://<prometheus-svc>:9090/api/v1/write)
+    enableRemoteWriteReceiver: true
+    # Lab: emptyDir. For data that survives restarts:
+    # storageSpec:
+    #   volumeClaimTemplate:
+    #     spec:
+    #       accessModes: ["ReadWriteOnce"]
+    #       resources: { requests: { storage: 10Gi } }
+
+  # Scrape the app pods directly (CONVENTIONS §8: container port named `http`, path /metrics).
+  # jobLabel → job="student-app" (the value of the pod label), the same job name the compose
+  # Prometheus uses, so prometheusrule-slo.yaml and the dashboards work unchanged.
+  # If the student-app Helm chart's optional ServiceMonitor is enabled, disable one of the two
+  # or every request is counted twice.
+  additionalPodMonitors:
+    - name: student-app
+      namespaceSelector:
+        matchNames: ["student-app"]
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: student-app
+      jobLabel: app.kubernetes.io/name
+      podMetricsEndpoints:
+        - port: http
+          path: /metrics
+          interval: 15s
+          # The operator adds namespace/pod/container labels; `instance` (pod-ip:port) is
+          # what the dashboards join student_app_app_info on.
+
+  # Alternative without CRDs: classic annotation-based discovery
+  # (prometheus.io/scrape|port|path on the pod, CONVENTIONS §8). Do not enable both.
+  # prometheusSpec:
+  #   additionalScrapeConfigs:
+  #     - job_name: student-app
+  #       kubernetes_sd_configs:
+  #         - role: pod
+  #           namespaces: { names: ["student-app"] }
+  #       relabel_configs:
+  #         - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+  #           action: keep
+  #           regex: "true"
+  #         - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+  #           target_label: __metrics_path__
+  #           regex: (.+)
+  #         - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+  #           regex: ([^:]+)(?::\d+)?;(\d+)
+  #           replacement: $1:$2
+  #           target_label: __address__
+  #         - source_labels: [__meta_kubernetes_pod_name]
+  #           target_label: pod

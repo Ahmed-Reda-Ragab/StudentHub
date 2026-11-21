@@ -1,0 +1,70 @@
+# AWS CodeBuild as the ECS deployer (scenario 36b) — or only the migration step before a
+# CodePipeline deploy action (DEPLOY_STEP=migrate).
+#
+#   1. image  = imageDetail.json from the build artifact (CODEBUILD_SRC_DIR_build_output) or $IMAGE_URI
+#   2. render = newest revision of the family + new image (deploy/ecs/render-taskdef.sh live)
+#   3. register the revision, run `php artisan migrate --force` with it (deploy/ecs/run-migrations.sh)
+#   4. DEPLOY_STEP=all: update-service and wait until the deployment COMPLETED (or FAILED -> exit 1)
+#
+# Primary source: the repository (scripts); secondary input: build_output (imageDetail.json).
+version: 0.2
+
+env:
+  variables:
+    ECS_CLUSTER: student-app-lab
+    ECS_SERVICE: student-app-lab-app
+    TASK_FAMILY: ""   # default: family of the service's current task definition
+    DEPLOY_STEP: all  # all | migrate (overridden per pipeline action)
+    WAIT_MINUTES: "30"
+
+phases:
+  pre_build:
+    commands:
+      - |
+        if [ -z "${IMAGE_URI:-}" ] && [ -n "${CODEBUILD_SRC_DIR_build_output:-}" ]; then
+          IMAGE_URI="$(jq -r .ImageURI "$CODEBUILD_SRC_DIR_build_output/imageDetail.json")"
+        fi
+        if [ -z "${IMAGE_URI:-}" ] || [ "$IMAGE_URI" = "null" ]; then
+          echo "IMAGE_URI unknown: no imageDetail.json input and no IMAGE_URI variable"
+          exit 1
+        fi
+        case "$IMAGE_URI" in *:latest) echo "refusing to deploy :latest (CONVENTIONS §2)"; exit 1 ;; esac
+        export IMAGE_URI
+        echo "release image: $IMAGE_URI"
+      - |
+        if [ -z "$TASK_FAMILY" ]; then
+          current="$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' --output text)"
+          TASK_FAMILY="$(basename "$current" | cut -d: -f1)"
+        fi
+        export TASK_FAMILY
+        echo "family: $TASK_FAMILY"
+
+  build:
+    commands:
+      - bash deploy/ecs/render-taskdef.sh live "$TASK_FAMILY" "$IMAGE_URI" > taskdef-release.json
+      - |
+        TD_ARN="$(aws ecs register-task-definition --cli-input-json file://taskdef-release.json \
+          --query taskDefinition.taskDefinitionArn --output text)"
+        export TD_ARN
+        echo "registered $TD_ARN"
+      - bash deploy/ecs/run-migrations.sh --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --task-definition "$TD_ARN"
+      - |
+        if [ "$DEPLOY_STEP" != "all" ]; then
+          echo "DEPLOY_STEP=$DEPLOY_STEP: migrations only, the pipeline deploy action rolls out the image"
+          exit 0
+        fi
+        aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --task-definition "$TD_ARN" >/dev/null
+        # Poll the rollout of OUR revision: COMPLETED, or FAILED when the circuit breaker / alarms roll back.
+        deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
+        while :; do
+          state="$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query "services[0].deployments[?taskDefinition=='$TD_ARN'] | [0].rolloutState" --output text)"
+          echo "$(date -u +%H:%M:%S) rollout: $state"
+          case "$state" in
+            COMPLETED) echo "deployed $TD_ARN"; break ;;
+            FAILED | None) echo "rollout failed (rolled back?) - see: aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE"; exit 1 ;;
+          esac
+          if [ "$(date +%s)" -ge "$deadline" ]; then echo "timed out after ${WAIT_MINUTES} min"; exit 1; fi
+          sleep 15
+        done

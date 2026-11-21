@@ -1,0 +1,201 @@
+# CD -> EC2 with Ansible (scenario 33): the runner is the Ansible controller.
+#
+#   dynamic inventory (amazon.aws.aws_ec2, tag:Project=student-app) -> playbooks/deploy.yml
+#   -e app_image=<ecr>/student-app:<sha>   (idempotent: re-running the same image changes nothing)
+#
+# connection=ssm (default): Session Manager through the OIDC role - no port 22, no key. Needs, on
+#   the deploy role: ssm:StartSession/TerminateSession on the instances + document
+#   SSM-SessionManagerRunShell, and s3:Get/Put/Delete/ListBucket on ANSIBLE_SSM_BUCKET (module
+#   transfer via presigned URLs; the instance itself needs no S3 permission).
+# connection=ssh: secret EC2_SSH_PRIVATE_KEY + port 22 open to the runner (stack 20 ssh_cidrs).
+name: Deploy EC2 (Ansible)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag in ECR (git short SHA). Empty = this commit's short SHA."
+        type: string
+        default: ""
+      connection:
+        description: "How Ansible reaches the hosts"
+        type: choice
+        options: [ssm, ssh]
+        default: ssm
+      target_hosts:
+        description: "Inventory pattern (default: app hosts outside an ASG = stack 20)"
+        type: string
+        default: "role_app:&standalone"
+      check_mode:
+        description: "Dry run (--check --diff): show what would change, change nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    name: ansible (${{ inputs.connection }}) -> lab
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: lab
+      url: ${{ vars.APP_URL }}
+    concurrency:
+      group: deploy-lab-ec2-single
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'student-app' }}
+      APP_URL: ${{ vars.APP_URL }}
+      CONNECTION: ${{ inputs.connection }}
+      TARGET_HOSTS: ${{ inputs.target_hosts }}
+      ANSIBLE_FORCE_COLOR: "1"
+    defaults:
+      run:
+        working-directory: infra/ansible
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs
+        id: inputs
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          tag="${IMAGE_TAG:-${GITHUB_SHA::7}}"
+          [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ && "$tag" != latest ]] \
+            || { echo "::error::invalid image tag: $tag"; exit 1; }
+          [[ "$TARGET_HOSTS" =~ ^[A-Za-z0-9_:\&\!.*,-]+$ ]] || { echo "::error::invalid target_hosts"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .github/workflows/deploy-ec2-ansible.yml
+
+      # ansible-core 2.21 (Python 3.12, same as lint-infra.yml); 2.22 needs Python 3.13.
+      # amazon.aws/community.aws 12.x need ansible-core >= 2.18 and boto3 >= 1.38; 2.18/2.19 are EOL in 2026 -> 2.20+.
+      - name: Install Ansible
+        run: |
+          pip install "ansible-core>=2.20,<2.22" "boto3>=1.38" "botocore>=1.38"
+          ansible --version
+
+      - name: Cache collections
+        uses: actions/cache@v4
+        with:
+          path: ~/.ansible/collections
+          key: ansible-collections-${{ hashFiles('infra/ansible/requirements.yml') }}
+
+      - name: Install collections
+        run: ansible-galaxy collection install -r requirements.yml
+
+      - name: Install the Session Manager plugin
+        if: inputs.connection == 'ssm'
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSLo session-manager-plugin.deb \
+            https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb
+          sudo dpkg -i session-manager-plugin.deb
+          session-manager-plugin --version
+
+      - name: Install the SSH key
+        if: inputs.connection == 'ssh'
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SSH_KEY" ]] || { echo "::error::secret EC2_SSH_PRIVATE_KEY is not set"; exit 1; }
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: deploy-ansible-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Resolve the image in ECR
+        id: image
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$TAG" >/dev/null \
+            || { echo "::error::$ECR_REPOSITORY:$TAG is not in ECR - did CI push it?"; exit 1; }
+          echo "uri=$account.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Show the inventory
+        run: |
+          ansible-inventory --graph
+          ansible "$TARGET_HOSTS" --list-hosts
+
+      - name: Run playbooks/deploy.yml
+        env:
+          IMAGE: ${{ steps.image.outputs.uri }}
+          SSM_BUCKET: ${{ vars.ANSIBLE_SSM_BUCKET }}
+          CHECK_MODE: ${{ inputs.check_mode }}
+        run: |
+          set -euo pipefail
+          args=(-e "app_image=$IMAGE" -e "target_hosts=$TARGET_HOSTS" -e "deploy_connection=$CONNECTION"
+                -e "aws_region=$AWS_REGION")
+          if [[ "$CONNECTION" == ssm ]]; then
+            [[ -n "$SSM_BUCKET" ]] || { echo "::error::set the ANSIBLE_SSM_BUCKET variable (bootstrap output ansible_ssm_bucket)"; exit 1; }
+            args+=(-e "ssm_bucket_name=$SSM_BUCKET")
+          else
+            args+=(--private-key ~/.ssh/deploy_key)
+          fi
+          [[ "$CHECK_MODE" != true ]] || args+=(--check --diff)
+          ansible-playbook playbooks/deploy.yml "${args[@]}" | tee "$RUNNER_TEMP/ansible.log"
+
+      - name: Smoke test APP_URL
+        id: smoke
+        if: env.APP_URL != '' && inputs.check_mode == false
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+        run: |
+          set -euo pipefail
+          body=$(curl -fsS -m 5 --retry 12 --retry-delay 5 --retry-all-errors "$APP_URL/ready")
+          echo "$body" | jq .
+          [[ "$(jq -r .status <<<"$body")" == ready ]]
+          version=$(jq -r .version <<<"$body")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" =~ ^[0-9a-f]{7}$ && "$version" != "$TAG" ]]; then
+            echo "::error::$APP_URL serves $version, expected $TAG"; exit 1
+          fi
+
+      - name: Job summary
+        if: always()
+        env:
+          IMAGE: ${{ steps.image.outputs.uri }}
+          SMOKE: ${{ steps.smoke.outcome }}
+          VERSION: ${{ steps.smoke.outputs.version }}
+        run: |
+          {
+            echo "### EC2 deploy with Ansible (\`$CONNECTION\`) - scenario 33"
+            echo
+            echo "| Image | Hosts | Smoke | Live version |"
+            echo "|---|---|---|---|"
+            echo "| \`${IMAGE:-n/a}\` | \`$TARGET_HOSTS\` | ${SMOKE:-skipped} | \`${VERSION:-?}\` |"
+            if [[ -s "$RUNNER_TEMP/ansible.log" ]]; then
+              echo; echo '```text'; sed -n '/PLAY RECAP/,$p' "$RUNNER_TEMP/ansible.log" | sed 's/\x1b\[[0-9;]*m//g'; echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the key
+        if: always() && inputs.connection == 'ssh'
+        run: rm -f ~/.ssh/deploy_key

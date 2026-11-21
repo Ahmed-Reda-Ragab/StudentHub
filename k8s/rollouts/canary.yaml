@@ -1,0 +1,190 @@
+# Canary on EKS with ALB traffic routing — standalone teaching example (scenario 68).
+#
+# Without a traffic router a canary is approximated by replica counts (1 of 4 pods ≈ 25%). With
+# trafficRouting.alb, Argo Rollouts writes the weights into the ALB listener rule (two target groups),
+# so 10% means 10% of requests even with 2 pods.
+#
+# Prerequisites: AWS Load Balancer Controller, Argo Rollouts, kube-prometheus-stack; the plain
+# manifests (ConfigMap/Secret/ServiceAccount/NetworkPolicy) and analysis-prometheus.yaml applied.
+#
+#   kubectl apply -f k8s/rollouts/analysis-prometheus.yaml -f k8s/rollouts/canary.yaml
+#   kubectl argo rollouts set image student-app-canary app=<ECR>/student-app:<NEW_SHA> -n student-app
+#   kubectl argo rollouts get rollout student-app-canary -n student-app --watch
+#   kubectl get ingress student-app-canary -n student-app -o yaml | grep -A3 actions   # live weights
+#   kubectl argo rollouts abort student-app-canary -n student-app                      # manual kill switch
+#
+# The production chart renders this with -f values-eks.yaml (rollout.canary.trafficRouting.alb.enabled).
+apiVersion: v1
+kind: Service
+metadata:
+  name: student-app-canary-stable
+  namespace: student-app
+  labels:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: canary-demo
+spec:
+  # Argo Rollouts pins this to the stable ReplicaSet (adds rollouts-pod-template-hash).
+  selector:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: canary-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: student-app-canary-canary
+  namespace: student-app
+  labels:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: canary-demo
+spec:
+  # ...and this one to the canary ReplicaSet.
+  selector:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: canary-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: student-app-canary
+  namespace: student-app
+  labels:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: canary-demo
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-name: student-app-lab-canary
+    alb.ingress.kubernetes.io/healthcheck-path: /ready
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/tags: Project=student-app,Env=lab,ManagedBy=kubernetes,Scenario=68
+    # Argo Rollouts adds alb.ingress.kubernetes.io/actions.student-app-canary-stable here:
+    # a forward action with weights {stable: 90, canary: 10}, updated at every setWeight step.
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                # Must be the stableService (or rootService) and port "use-annotation": the ALB
+                # controller then reads the routing from the action annotation Argo maintains.
+                name: student-app-canary-stable
+                port:
+                  name: use-annotation
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: student-app-canary
+  namespace: student-app
+  labels:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: canary-demo
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 300
+  progressDeadlineAbort: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: student-app
+      app.kubernetes.io/component: canary-demo
+  strategy:
+    canary:
+      stableService: student-app-canary-stable
+      canaryService: student-app-canary-canary
+      trafficRouting:
+        alb:
+          ingress: student-app-canary
+          servicePort: 80
+      # After an abort, keep the canary pods 30 s for inspection, then scale them away.
+      abortScaleDownDelaySeconds: 30
+      # 10 → 25 → 50 → 100 %. Each pause is "soak time" for the analysis to collect evidence.
+      # `pause: {}` (no duration) would wait for a human: kubectl argo rollouts promote.
+      steps:
+        - setWeight: 10
+        - pause: {duration: 2m}
+        - setWeight: 25
+        - pause: {duration: 2m}
+        - setWeight: 50
+        - pause: {duration: 5m}
+        - setWeight: 100
+      # Background analysis from step 1 until fully promoted. Any failed verdict → automatic abort:
+      # weights back to 100% stable within seconds, no human needed (scenario 68).
+      # CloudWatch alternative: templateName alb-5xx-rate with load-balancer/target-group args
+      # (analysis-cloudwatch.yaml).
+      analysis:
+        startingStep: 1
+        templates:
+          - templateName: error-rate
+        args:
+          - name: canary-hash
+            valueFrom:
+              podTemplateHashValue: Latest
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: student-app
+        app.kubernetes.io/component: canary-demo
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: student-app
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 82
+        runAsGroup: 82
+        fsGroup: 82
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/student-app:0000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: student-app-config
+            - secretRef:
+                name: student-app-secrets
+          startupProbe:
+            httpGet: {path: /up, port: http}
+            periodSeconds: 2
+            failureThreshold: 45
+          livenessProbe:
+            httpGet: {path: /up, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]

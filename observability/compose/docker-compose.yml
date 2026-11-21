@@ -1,0 +1,148 @@
+# Lab observability stack — scenarios 12 and 71.
+#
+#   Prometheus (metrics + SLO rules) ─► Alertmanager ─► alert-sink (logs notifications)
+#   Grafana (dashboards: RED, SLO, canary)   Loki ◄─ Alloy (Docker logs of every container)
+#   node-exporter (host)   cAdvisor (per-container CPU / memory / network)
+#
+# Run order: the APP stack first (it creates the network student-app_default), then this:
+#   docker compose up -d                                      # or deploy/ec2/lb (same project name)
+#   docker compose -f observability/compose/docker-compose.yml up -d
+#   docker compose -f observability/compose/docker-compose.yml down        # keep data
+#   docker compose -f observability/compose/docker-compose.yml down -v     # wipe data
+#
+# All UIs listen on 127.0.0.1 only (on EC2: SSM/SSH port-forward). URLs in README.md.
+# Images are pinned; bump them deliberately (release notes!), never `latest`.
+name: student-app-obs
+
+networks:
+  default: {}
+  # The app's network: Prometheus resolves app / app_blue / app_green by service name.
+  app:
+    name: student-app_default
+    external: true
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
+  loki-data:
+  alloy-data:
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=31d # the SLO window is 30 days
+      - --storage.tsdb.retention.size=5GB # …but never fill the lab disk
+      - --web.enable-lifecycle # POST /-/reload after editing rules
+      - --web.enable-remote-write-receiver # k6 --out experimental-prometheus-rw
+      - --web.enable-otlp-receiver # k6 --out opentelemetry (/api/v1/otlp/v1/metrics)
+    volumes:
+      - ../prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${LAB_PROMETHEUS_PORT:-9090}:9090"
+    networks: [default, app]
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.35.0
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ../prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "127.0.0.1:${LAB_ALERTMANAGER_PORT:-9093}:9093"
+    restart: unless-stopped
+
+  # Stand-in for PagerDuty/Slack/email: prints every webhook it receives.
+  alert-sink:
+    image: mendhak/http-https-echo:43
+    environment:
+      HTTP_PORT: "8080"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.3.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${LAB_GRAFANA_PASSWORD:-admin} # change it outside a laptop
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/student-app/student-app-slo.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/dashboards:/etc/grafana/dashboards/student-app:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${LAB_GRAFANA_PORT:-3000}:3000"
+    depends_on: [prometheus, loki, alertmanager]
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.7.10
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "127.0.0.1:${LAB_LOKI_PORT:-3100}:3100"
+    restart: unless-stopped
+
+  # Grafana Alloy replaces Promtail (deprecated, EOL): discovers containers through the
+  # Docker API and ships their stdout/stderr to Loki, parsing Laravel's JSON log lines.
+  alloy:
+    image: grafana/alloy:v1.22.0
+    user: "0:0" # read access to the Docker socket
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro # read-only, still powerful: lab only
+      - alloy-data:/var/lib/alloy/data
+    ports:
+      - "127.0.0.1:${LAB_ALLOY_PORT:-12345}:12345"
+    depends_on: [loki]
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.13.1
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/containers/.+)($$|/)
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    pid: host
+    restart: unless-stopped
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.61.1 # moved from gcr.io/cadvisor/cadvisor at v0.53
+    privileged: true
+    devices:
+      - /dev/kmsg
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=15s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "127.0.0.1:${LAB_CADVISOR_PORT:-8089}:8080"
+    restart: unless-stopped

@@ -1,0 +1,131 @@
+{
+  "family": "student-app-${ENV_NAME}-app",
+  "taskRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/student-app-${ENV_NAME}-ecs-task",
+  "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/student-app-${ENV_NAME}-ecs-execution",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "512",
+  "memory": "1024",
+  "runtimePlatform": {
+    "operatingSystemFamily": "LINUX",
+    "cpuArchitecture": "X86_64"
+  },
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "${IMAGE_URI}",
+      "essential": true,
+      "portMappings": [
+        {
+          "name": "http",
+          "containerPort": 8080,
+          "hostPort": 8080,
+          "protocol": "tcp",
+          "appProtocol": "http"
+        }
+      ],
+      "environment": [
+        {
+          "name": "APP_DEBUG",
+          "value": "false"
+        },
+        {
+          "name": "APP_ENV",
+          "value": "production"
+        },
+        {
+          "name": "DEPLOY_COLOR",
+          "value": "stable"
+        },
+        {
+          "name": "LOG_LEVEL",
+          "value": "info"
+        },
+        {
+          "name": "QUEUE_CONNECTION",
+          "value": "sync"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "APP_KEY",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/APP_KEY"
+        },
+        {
+          "name": "APP_URL",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/APP_URL"
+        },
+        {
+          "name": "CACHE_STORE",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/CACHE_STORE"
+        },
+        {
+          "name": "DB_CONNECTION",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/DB_CONNECTION"
+        },
+        {
+          "name": "DB_DATABASE",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/DB_DATABASE"
+        },
+        {
+          "name": "DB_HOST",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/DB_HOST"
+        },
+        {
+          "name": "DB_PASSWORD",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/DB_PASSWORD"
+        },
+        {
+          "name": "DB_PORT",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/DB_PORT"
+        },
+        {
+          "name": "DB_USERNAME",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/DB_USERNAME"
+        },
+        {
+          "name": "METRICS_ENABLED",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/METRICS_ENABLED"
+        },
+        {
+          "name": "SESSION_DRIVER",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/SESSION_DRIVER"
+        },
+        {
+          "name": "SRE_LAB_ENABLED",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/SRE_LAB_ENABLED"
+        },
+        {
+          "name": "SRE_LAB_TOKEN",
+          "valueFrom": "arn:aws:ssm:${AWS_REGION}:${AWS_ACCOUNT_ID}:parameter/student-app/${ENV_NAME}/app/SRE_LAB_TOKEN"
+        }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://127.0.0.1:8080/up || exit 1"
+        ],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      },
+      "stopTimeout": 30,
+      "linuxParameters": {
+        "initProcessEnabled": false
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/student-app-${ENV_NAME}/app",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "app",
+          "mode": "non-blocking",
+          "max-buffer-size": "25m"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+---
+# Host network: metrics describe the host's interfaces, not a container veth; host pid: per-process
+# stats. The host root is mounted read-only (rslave so later mounts such as EBS volumes show up).
+# Port 9100 is NOT opened by the stacks' security groups: scrape it from inside the VPC only
+# (Prometheus in the VPC, or an SSM port-forward from your laptop).
+- name: Run node_exporter
+  community.docker.docker_container:
+    name: "{{ node_exporter_container_name }}"
+    image: "{{ node_exporter_image }}"
+    command:
+      - --path.rootfs=/host
+      - "--web.listen-address=:{{ node_exporter_port }}"
+    network_mode: host
+    pid_mode: host
+    volumes:
+      - /:/host:ro,rslave
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opts:
+      - no-new-privileges:true
+    restart_policy: unless-stopped
+    state: started
+    pull: missing

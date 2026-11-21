@@ -1,0 +1,296 @@
+# Deploy to ECS Fargate — scenarios 53 (rolling + circuit breaker), 54 (CodeDeploy blue/green),
+# 55 (ECS-native blue/green / linear / canary), 57 (load/fault drills via extra env), 58 (vs CodePipeline).
+#
+#   OIDC -> image exists in ECR? -> service controller matches the strategy?
+#   -> task definition (live: newest Terraform revision | repo: deploy/ecs/task-definition.json)
+#   -> render (new image) -> register -> migrations (one-off task) -> deploy + wait -> smoke test
+#
+# Repository variables (CONVENTIONS §9): AWS_REGION, AWS_DEPLOY_ROLE_ARN, ECR_REPOSITORY,
+# ECS_CLUSTER, ECS_SERVICE (stack 50 outputs). Optional: ECS_APP_URL (else derived from the ALB),
+# ECS_CODEDEPLOY_APPLICATION / ECS_CODEDEPLOY_DEPLOYMENT_GROUP (default student-app-lab-ecs).
+name: Deploy ECS
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag in ECR (git short SHA). Empty = short SHA of the selected ref"
+        required: false
+        default: ""
+        type: string
+      strategy:
+        description: "rolling / native = ECS controller (strategy set by Terraform) · codedeploy = CODE_DEPLOY controller"
+        required: true
+        default: rolling
+        type: choice
+        options:
+          - rolling
+          - native
+          - codedeploy
+      taskdef_source:
+        description: "live = newest revision of the family (Terraform env/secrets) + new image · repo = deploy/ecs/task-definition.json"
+        required: true
+        default: live
+        type: choice
+        options:
+          - live
+          - repo
+      extra_env:
+        description: "Extra env, space-separated KEY=value (fault drills, scenarios 53–55 and 57: SRE_FAULT_ERROR_RATE=0.5 DEPLOY_COLOR=green). SRE_FAULT_* never carry over to the next deploy."
+        required: false
+        default: ""
+        type: string
+      run_migrations:
+        description: "Run the one-off migration task first (uncheck only for the boot-fail drill: a broken image cannot migrate)"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write # OIDC -> AWS_DEPLOY_ROLE_ARN, no stored AWS keys
+
+concurrency:
+  group: deploy-ecs-lab
+  cancel-in-progress: false # never interrupt a deployment that is shifting traffic
+
+jobs:
+  deploy:
+    name: Deploy (${{ inputs.strategy }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment:
+      name: lab
+      url: ${{ steps.smoke.outputs.app_url }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'student-app' }}
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER || 'student-app-lab' }}
+      ECS_SERVICE: ${{ vars.ECS_SERVICE || 'student-app-lab-app' }}
+      ENV_NAME: lab
+      CONTAINER_NAME: app
+      STRATEGY: ${{ inputs.strategy }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve image tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.image_tag }}
+        run: |
+          tag="${INPUT_TAG:-${GITHUB_SHA::7}}"
+          if [[ "$tag" == "latest" || ! "$tag" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+            echo "::error::invalid image tag '$tag' (immutable git short SHA expected, never latest)"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: deploy-ecs-${{ github.run_id }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Image exists in ECR
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if ! pushed="$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$TAG" \
+                --query 'imageDetails[0].imagePushedAt' --output text 2>/dev/null)"; then
+            echo "::error::$ECR_REPOSITORY:$TAG is not in ECR. Run CI (ci.yml) on that commit first (build once, deploy many)."
+            exit 1
+          fi
+          echo "pushed at $pushed"
+          echo "uri=$REGISTRY/$ECR_REPOSITORY:$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Service matches the strategy
+        id: svc
+        run: |
+          svc="$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --output json)"
+          current="$(jq -r '.services[0].taskDefinition // empty' <<<"$svc")"
+          if [[ -z "$current" ]]; then
+            echo "::error::service $ECS_SERVICE not found in cluster $ECS_CLUSTER (apply stack 50 first)"
+            exit 1
+          fi
+          controller="$(jq -r '.services[0].deploymentController.type // "ECS"' <<<"$svc")"
+          ecs_strategy="$(jq -r '.services[0].deploymentConfiguration.strategy // "ROLLING"' <<<"$svc")"
+          want=ECS
+          [[ "$STRATEGY" == "codedeploy" ]] && want=CODE_DEPLOY
+          if [[ "$controller" != "$want" ]]; then
+            echo "::error::service uses the $controller controller but strategy=$STRATEGY needs $want (stack 50: deployment_controller)"
+            exit 1
+          fi
+          if [[ "$STRATEGY" == "native" && "$ecs_strategy" == "ROLLING" ]]; then
+            echo "::error::service strategy is ROLLING; set deployment_strategy = BLUE_GREEN | LINEAR | CANARY in stack 50"
+            exit 1
+          fi
+          if [[ "$STRATEGY" == "rolling" && "$ecs_strategy" != "ROLLING" && "$controller" == "ECS" ]]; then
+            echo "::warning::the service is configured for $ecs_strategy; ECS uses that, not a rolling update"
+          fi
+          family="${current##*/}"
+          family="${family%%:*}"
+          {
+            echo "family=$family"
+            echo "previous=$current"
+            echo "ecs_strategy=$ecs_strategy"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Task definition (${{ inputs.taskdef_source }})
+        env:
+          SOURCE: ${{ inputs.taskdef_source }}
+          FAMILY: ${{ steps.svc.outputs.family }}
+        run: |
+          if [[ "$SOURCE" == "live" ]]; then
+            # describe-task-definition of the family + strip read-only fields (render-taskdef.sh live)
+            bash deploy/ecs/render-taskdef.sh live "$FAMILY" > taskdef.json
+          else
+            AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)" \
+              bash deploy/ecs/render-taskdef.sh repo deploy/ecs/task-definition.json > taskdef.json
+          fi
+          jq '{family, cpu, memory, image: .containerDefinitions[0].image}' taskdef.json
+
+      - name: Extra environment
+        id: extra
+        env:
+          EXTRA_ENV: ${{ inputs.extra_env }}
+        run: |
+          delimiter="EOF_$(openssl rand -hex 8)"
+          read -ra pairs <<<"$EXTRA_ENV"
+          {
+            echo "vars<<$delimiter"
+            for pair in "${pairs[@]}"; do
+              if [[ ! "$pair" =~ ^[A-Z_][A-Z0-9_]*=[^[:space:]]*$ ]]; then
+                echo "::error::extra_env entry '$pair' is not KEY=value" >&2
+                exit 1
+              fi
+              echo "$pair"
+            done
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Render task definition (new image)
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: taskdef.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.image.outputs.uri }}
+          environment-variables: ${{ steps.extra.outputs.vars }}
+
+      # Register only (no service): the migration task must run the NEW image before any task
+      # serves it. The deploy step below registers the same content again (one extra, identical
+      # revision) because the action only accepts a file, not an ARN.
+      - name: Register task definition
+        id: register
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+
+      - name: Migrations (one-off task, once per release)
+        if: inputs.run_migrations
+        env:
+          TASK_DEFINITION: ${{ steps.register.outputs.task-definition-arn }}
+        run: bash deploy/ecs/run-migrations.sh --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --task-definition "$TASK_DEFINITION"
+
+      - name: Deploy (ECS controller — rolling or native traffic shifting)
+        id: deploy_ecs
+        if: inputs.strategy != 'codedeploy'
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
+          wait-for-service-stability: true
+          wait-for-minutes: 45 # native B/G: test traffic + linear/canary steps + bake time
+
+      - name: Deploy (CodeDeploy blue/green)
+        id: deploy_codedeploy
+        if: inputs.strategy == 'codedeploy'
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
+          codedeploy-appspec: deploy/ecs/appspec.yaml
+          codedeploy-application: ${{ vars.ECS_CODEDEPLOY_APPLICATION || 'student-app-lab-ecs' }}
+          codedeploy-deployment-group: ${{ vars.ECS_CODEDEPLOY_DEPLOYMENT_GROUP || 'student-app-lab-ecs' }}
+          codedeploy-deployment-description: "student-app ${{ steps.tag.outputs.tag }} (GitHub run ${{ github.run_id }})"
+          wait-for-service-stability: true
+          wait-for-minutes: 45
+
+      - name: Smoke test through the ALB
+        id: smoke
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          APP_URL: ${{ vars.ECS_APP_URL }}
+        run: |
+          if [[ -z "$APP_URL" ]]; then
+            tg="$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+              --query 'services[0].loadBalancers[0].targetGroupArn' --output text)"
+            lb="$(aws elbv2 describe-target-groups --target-group-arns "$tg" \
+              --query 'TargetGroups[0].LoadBalancerArns[0]' --output text)"
+            APP_URL="http://$(aws elbv2 describe-load-balancers --load-balancer-arns "$lb" \
+              --query 'LoadBalancers[0].DNSName' --output text)"
+          fi
+          echo "app_url=$APP_URL" >> "$GITHUB_OUTPUT"
+
+          # /ready = DB ping + the version actually serving (APP_VERSION baked into the image).
+          ok=0
+          for i in $(seq 1 20); do
+            body="$(curl -fsSL -m 5 "$APP_URL/ready" 2>/dev/null || true)"
+            version="$(jq -r '.version // empty' <<<"$body" 2>/dev/null || true)"
+            if [[ "$version" == "$TAG" ]]; then
+              echo "ready: $body"
+              ok=1
+              break
+            fi
+            echo "attempt $i: serving '${version:-?}', waiting for $TAG"
+            sleep 6
+          done
+          if [[ "$ok" != 1 ]]; then
+            echo "::error::$APP_URL/ready does not serve $TAG"
+            exit 1
+          fi
+
+          code="$(curl -sL -o /dev/null -w '%{http_code}' -m 10 "$APP_URL/login")"
+          if [[ "$code" -ge 500 ]]; then
+            echo "::error::GET /login returned $code"
+            exit 1
+          fi
+
+      - name: Job summary
+        if: always()
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          IMAGE: ${{ steps.image.outputs.uri }}
+          SOURCE: ${{ inputs.taskdef_source }}
+          PREVIOUS: ${{ steps.svc.outputs.previous }}
+          ECS_STRATEGY: ${{ steps.svc.outputs.ecs_strategy }}
+          REGISTERED: ${{ steps.register.outputs.task-definition-arn }}
+          CODEDEPLOY_ID: ${{ steps.deploy_codedeploy.outputs.codedeploy-deployment-id }}
+          APP_URL: ${{ steps.smoke.outputs.app_url }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          {
+            echo "### ECS deploy — ${OUTCOME}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`${IMAGE:-$TAG}\` |"
+            echo "| Strategy | \`$STRATEGY\` (service: \`${ECS_STRATEGY:-?}\`) |"
+            echo "| Task definition source | \`$SOURCE\` |"
+            echo "| Previous revision | \`${PREVIOUS:-?}\` |"
+            echo "| Migration revision | \`${REGISTERED:-not registered}\` |"
+            if [[ -n "$CODEDEPLOY_ID" ]]; then echo "| CodeDeploy deployment | \`$CODEDEPLOY_ID\` |"; fi
+            echo "| URL | ${APP_URL:-n/a} |"
+            echo ""
+            echo "Rollback: re-run with the previous image tag, or \`aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --task-definition ${PREVIOUS:-<previous-arn>}\`."
+          } >> "$GITHUB_STEP_SUMMARY"

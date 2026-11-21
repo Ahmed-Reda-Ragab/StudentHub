@@ -1,0 +1,99 @@
+# EKS (infra/terraform/stacks/60-eks), scenarios 62–69.
+# Prerequisites in the cluster: AWS Load Balancer Controller, External Secrets Operator (Pod Identity),
+# Argo Rollouts, kube-prometheus-stack (with observability/k8s/kube-prometheus-stack-values.yaml),
+# metrics-server, VPC CNI network policy enabled.
+#
+# GitOps: this file is the desired state Argo CD syncs (k8s/argocd/application.yaml). CI changes
+# image.tag here through a pull request (deploy-eks.yml mode=gitops-bump); rollback = git revert.
+# Imperative: deploy-eks.yml mode=helm|rollouts overrides image.repository/tag on the command line.
+
+image:
+  # <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/student-app — rewritten by the gitops-bump job.
+  repository: 123456789012.dkr.ecr.us-east-1.amazonaws.com/student-app
+  tag: "0000000"
+  pullPolicy: IfNotPresent
+
+config:
+  APP_URL: https://student-app.example.com
+  # DB_HOST/DB_PORT/DB_DATABASE/DB_USERNAME/DB_PASSWORD come from SSM (RDS module) via the Secret,
+  # which wins over these defaults.
+
+service:
+  type: ClusterIP
+
+ingress:
+  enabled: true
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    # Pod IPs as targets: no NodePort hop, and health checks reach each pod directly.
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-name: student-app-lab-eks
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /ready
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "10"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+    alb.ingress.kubernetes.io/tags: Project=student-app,Env=lab,ManagedBy=helm,Scenario=63
+    # HTTPS: certificate-arn + listen-ports '[{"HTTP":80},{"HTTPS":443}]' + ssl-redirect "443".
+  blockPaths:
+    - /metrics
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+
+externalSecrets:
+  enabled: true
+  ssmPath: /student-app/lab/app
+  store:
+    # Set create=false if Terraform already created a store, and use its name.
+    create: true
+    kind: ClusterSecretStore
+    name: student-app-parameter-store
+    region: us-east-1
+
+networkPolicy:
+  databaseTo:
+    - ipBlock:
+        cidr: 10.60.0.0/16     # VPC CIDR of stack 60-eks (var.vpc_cidr) — RDS / ElastiCache live here
+
+# Scraping is done by the PodMonitor in observability/k8s/kube-prometheus-stack-values.yaml
+# (job="student-app", container port "http"). Enabling this ServiceMonitor as well would count
+# every request twice — turn it on only if that PodMonitor is not deployed (e.g. kube-prometheus-stack
+# installed by Terraform 60-eks without those values). No scraping at all = the canary analysis gets
+# no series and aborts every rollout (fail closed).
+serviceMonitor:
+  enabled: false
+
+# Canary with exact ALB weights + background Prometheus analysis (scenarios 67–68).
+# deploy-eks.yml mode=helm renders the plain Deployment instead (--set rollout.enabled=false).
+rollout:
+  enabled: true
+  strategy: canary
+  canary:
+    trafficRouting:
+      alb:
+        enabled: true
+    steps:
+      - setWeight: 10
+      - pause: {duration: 2m}
+      - setWeight: 25
+      - pause: {duration: 2m}
+      - setWeight: 50
+      - pause: {duration: 3m}
+      # 100% after the last step
+    analysis:
+      enabled: true
+      startingStep: 1
+
+analysis:
+  prometheus:
+    # kube-prometheus-stack release "kube-prometheus-stack" in namespace "monitoring".
+    address: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+  interval: 1m
+  rateWindow: 2m
+  failureLimit: 2

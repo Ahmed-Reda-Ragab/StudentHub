@@ -1,0 +1,170 @@
+# promtool unit tests for the SLO rules — proof that the alerts do what the docs claim.
+#
+#   promtool test rules observability/prometheus/rules/tests/slo-burn-rate.test.yml
+#   docker run --rm -v "$PWD/observability/prometheus:/p" -w /p --entrypoint promtool \
+#     prom/prometheus:v3.16.0 test rules rules/tests/slo-burn-rate.test.yml
+#
+# Series notation: '0+30x60' = start at 0, +30 every `interval`, 60 times.
+# With interval 1m that is 0.5 req/s for one hour.
+# Only FIRING alerts are reported by promtool (pending ones count as "no alert"),
+# which is how the `for:` durations are tested below.
+
+rule_files:
+  - ../recording.yml
+  - ../slo-burn-rate.yml
+
+evaluation_interval: 30s
+
+tests:
+  # 1) Half of all requests fail: the fast-burn page must fire within minutes,
+  #    the slow-burn page only after its 15m `for`.
+  - name: 50% errors fire the fast-burn page, then the slow-burn page
+    interval: 1m
+    input_series:
+      - series: 'student_app_http_requests_total{job="student-app",instance="app:8080",method="GET",route="students.index",status="200"}'
+        values: '0+30x60'
+      - series: 'student_app_http_requests_total{job="student-app",instance="app:8080",method="GET",route="students.index",status="500"}'
+        values: '0+30x60'
+    promql_expr_test:
+      - expr: job:student_app_sli_availability_errors:ratio_rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'job:student_app_sli_availability_errors:ratio_rate5m{job="student-app"}'
+            value: 0.5
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SLOAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels:
+              job: student-app
+              severity: page
+              slo: availability
+              burn: fast
+            exp_annotations:
+              summary: "student-app: availability error budget burning faster than 14.4x"
+              description: "50% of requests failed (5xx) over the last 1h and the 5m window agrees. SLO 99.5% allows 0.5%; at this rate the 30-day budget is gone in about 2 days."
+              runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#sloavailabilityfastburn"
+      # condition true since ~1m, but `for: 15m` → still pending at 10m
+      - eval_time: 10m
+        alertname: SLOAvailabilitySlowBurn
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: SLOAvailabilitySlowBurn
+        exp_alerts:
+          - exp_labels:
+              job: student-app
+              severity: page
+              slo: availability
+              burn: slow
+            exp_annotations:
+              summary: "student-app: availability error budget burning faster than 6x"
+              description: "50% of requests failed (5xx) over the last 6h and the 30m window agrees. SLO 99.5% allows 0.5%; at this rate the 30-day budget is gone in about 5 days."
+              runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#sloavailabilityslowburn"
+
+  # 2) A healthy service (0.1% errors, well inside the 0.5% budget) stays quiet.
+  - name: healthy traffic never alerts
+    interval: 1m
+    input_series:
+      - series: 'student_app_http_requests_total{job="student-app",instance="app:8080",method="GET",route="students.index",status="200"}'
+        values: '0+999x180'
+      - series: 'student_app_http_requests_total{job="student-app",instance="app:8080",method="GET",route="students.index",status="500"}'
+        values: '0+1x180'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SLOAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 1h
+        alertname: SLOAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 1h
+        alertname: SLOAvailabilitySlowBurn
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: SLOAvailabilityBudgetBurn
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: SLODrillFastBurn
+        exp_alerts: []
+
+  # 3) Errors on /sre-lab/error (a drill) must NOT burn the real availability SLO,
+  #    only the separate drill SLI and its drill="true" alerts.
+  - name: lab endpoint errors only burn the drill SLI
+    interval: 1m
+    input_series:
+      - series: 'student_app_http_requests_total{job="student-app",instance="app:8080",method="GET",route="students.index",status="200"}'
+        values: '0+600x60'
+      - series: 'student_app_http_requests_total{job="student-app",instance="app:8080",method="GET",route="sre-lab.error",status="500"}'
+        values: '0+60x60'
+      - series: 'student_app_http_requests_total{job="student-app",instance="app:8080",method="GET",route="sre-lab.error",status="200"}'
+        values: '0+60x60'
+    promql_expr_test:
+      - expr: student_app:sli_availability_errors:ratio_rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'student_app:sli_availability_errors:ratio_rate5m'
+            value: 0
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SLOAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: SLODrillFastBurn
+        exp_alerts:
+          - exp_labels:
+              job: student-app
+              severity: page
+              slo: availability-drill
+              burn: fast
+              drill: "true"
+            exp_annotations:
+              summary: "DRILL student-app: /sre-lab/error burning the drill budget faster than 14.4x"
+              description: "50% of /sre-lab/error requests failed over the last 1h and the 5m window agrees. Game-day traffic (loadtest/k6/error-budget-burn.js), not a user-facing incident."
+              runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#slodrillfastburn"
+
+  # 4) 80% of requests slower than 300ms (only 20% in the le="0.3" bucket):
+  #    the latency SLO (95% < 300ms, 5% budget) burns at 16x → fast-burn page.
+  - name: slow responses fire the latency fast-burn page
+    interval: 1m
+    input_series:
+      - series: 'student_app_http_request_duration_seconds_bucket{job="student-app",instance="app:8080",method="GET",route="students.index",le="0.3"}'
+        values: '0+6x60'
+      - series: 'student_app_http_request_duration_seconds_bucket{job="student-app",instance="app:8080",method="GET",route="students.index",le="+Inf"}'
+        values: '0+30x60'
+      - series: 'student_app_http_request_duration_seconds_count{job="student-app",instance="app:8080",method="GET",route="students.index"}'
+        values: '0+30x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SLOLatencyFastBurn
+        exp_alerts:
+          - exp_labels:
+              job: student-app
+              severity: page
+              slo: latency
+              burn: fast
+            exp_annotations:
+              summary: "student-app: latency error budget burning faster than 14.4x"
+              description: "80% of requests were slower than 300ms over the last 1h and the 5m window agrees. SLO: 95% under 300ms (5% budget); at this rate the 30-day budget is gone in about 2 days."
+              runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#slolatencyfastburn"
+      - eval_time: 10m
+        alertname: SLOAvailabilityFastBurn
+        exp_alerts: []
+
+  # 5) Every app target down (scrape fails) → page after 2m.
+  - name: all app targets down pages
+    interval: 1m
+    input_series:
+      - series: 'up{job="student-app",instance="app_blue:8080"}'
+        values: '0x10'
+      - series: 'up{job="student-app",instance="app_green:8080"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: StudentAppNoTargetsUp
+        exp_alerts:
+          - exp_labels:
+              job: student-app
+              severity: page
+            exp_annotations:
+              summary: "No student-app instance can be scraped"
+              description: "Every target of job student-app has been down for 2 minutes. One absent blue/green slot is normal; all of them means an outage or a broken scrape path."
+              runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#studentappnotargetsup"

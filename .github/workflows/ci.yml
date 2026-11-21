@@ -1,0 +1,222 @@
+# CI — scenario 30. Runs on every push / PR:
+#   lint (pint) · tests (SQLite + real MySQL) · dependency audit · Dockerfile lint
+#   → build image once → Trivy scan + SBOM → (main/master only) push to ECR via OIDC (no stored AWS keys)
+#
+# Repository variables (Settings → Secrets and variables → Actions → Variables):
+#   AWS_REGION        e.g. us-east-1
+#   AWS_ROLE_ARN      role created by infra/terraform/bootstrap (output: github_ci_role_arn)
+#   ECR_REPOSITORY    student-app
+#   PUSH_GHCR         "true" to also push to ghcr.io (alternative registry)
+name: CI
+
+on:
+  push:
+    branches: [master, main, devops-lab]
+    paths-ignore: ["docs/**", "**/*.md"]
+  pull_request:   # no paths filter: required status checks must always report, even on docs-only PRs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PHP_VERSION: "8.3"
+
+jobs:
+  lint:
+    name: Pint (code style)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          tools: composer:v2
+          coverage: none
+      - name: Composer cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache/files
+          key: composer-${{ hashFiles('composer.lock') }}
+      - run: composer install --no-interaction --prefer-dist --no-progress
+      - run: vendor/bin/pint --test
+
+  test:
+    name: Tests (${{ matrix.db }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [sqlite, mysql]
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: testing
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=5s --health-timeout=3s --health-retries=30
+    env:
+      # phpunit.xml defaults to SQLite in memory; real env vars win (no force="true").
+      DB_CONNECTION: ${{ matrix.db }}
+      DB_HOST: 127.0.0.1
+      DB_PORT: "3306"
+      DB_DATABASE: ${{ matrix.db == 'mysql' && 'testing' || ':memory:' }}
+      DB_USERNAME: root
+      DB_PASSWORD: root
+    steps:
+      - uses: actions/checkout@v6
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo_mysql, pdo_sqlite, mbstring
+          tools: composer:v2
+          coverage: none
+      - uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache/files
+          key: composer-${{ hashFiles('composer.lock') }}
+      - run: composer install --no-interaction --prefer-dist --no-progress
+      - run: cp .env.example .env && php artisan key:generate
+      - run: php artisan test --compact
+
+  audit:
+    name: Dependency audit (report only)
+    runs-on: ubuntu-latest
+    continue-on-error: true   # existing advisories must not block delivery; they are tracked, see scenario 82
+    steps:
+      - uses: actions/checkout@v6
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          tools: composer:v2
+          coverage: none
+      - name: composer audit
+        continue-on-error: true
+        run: composer audit --locked --format=table
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: npm audit
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
+  dockerfile-lint:
+    name: Hadolint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/Dockerfile
+          failure-threshold: error
+
+  image:
+    name: Build · scan · (push)
+    needs: [lint, test, dockerfile-lint]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write      # OIDC → AWS
+      packages: write      # optional GHCR push
+    env:
+      IMAGE: student-app:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Short SHA + build date
+        id: vars
+        run: |
+          echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (load into the runner for scanning)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: ${{ env.IMAGE }}
+          build-args: |
+            APP_VERSION=${{ steps.vars.outputs.sha }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.vars.outputs.date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Container smoke test (image boots and serves /up)
+        run: |
+          docker run -d --name smoke -p 8080:8080 \
+            -e APP_KEY=base64:$(openssl rand -base64 32) \
+            -e DB_CONNECTION=sqlite -e DB_DATABASE=/tmp/db.sqlite \
+            -e SESSION_DRIVER=array -e CACHE_STORE=array \
+            "$IMAGE"
+          for i in $(seq 1 30); do curl -fsS http://localhost:8080/up >/dev/null && break; sleep 2; done
+          curl -fsS http://localhost:8080/up >/dev/null || { docker logs smoke; exit 1; }
+          docker exec smoke php -m | grep -qi apcu
+          docker exec smoke id
+          docker rm -f smoke
+
+      - name: Trivy (OS + PHP/npm packages)
+        uses: aquasecurity/trivy-action@0.36.0   # >= 0.35.0: earlier tags were hit by the March 2026 supply-chain compromise
+        with:
+          image-ref: ${{ env.IMAGE }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"        # report-only in the lab; flip to "1" to make it a gate (scenario 82)
+
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.spdx.json
+
+      - name: Configure AWS credentials (OIDC)
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') && vars.AWS_ROLE_ARN != ''
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push to ECR (immutable SHA tag)
+        if: steps.ecr.outcome == 'success'
+        env:
+          REPO: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY || 'student-app' }}
+          TAG: ${{ steps.vars.outputs.sha }}
+        run: |
+          # Tags are IMMUTABLE in ECR: a re-run for the same commit must not fail the pipeline.
+          if aws ecr describe-images --repository-name "${REPO##*/}" --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "### \`$REPO:$TAG\` already exists (immutable) - push skipped" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          docker tag "$IMAGE" "$REPO:$TAG"
+          docker push "$REPO:$TAG"
+          echo "### Pushed \`$REPO:$TAG\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push to GHCR (alternative registry)
+        if: github.event_name == 'push' && vars.PUSH_GHCR == 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          REPO="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker tag "$IMAGE" "$REPO:${{ steps.vars.outputs.sha }}"
+          docker push "$REPO:${{ steps.vars.outputs.sha }}"

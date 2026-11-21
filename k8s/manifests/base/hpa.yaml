@@ -1,0 +1,37 @@
+# Scenario 6A: CPU-based autoscaling (needs metrics-server: an EKS add-on; on kind install it yourself).
+# Utilization is measured against the container *request* (100m), so 70% ≈ 70 millicores per pod.
+# Drive it with: k6 run loadtest/k6/load.js  or  curl "localhost:8088/sre-lab/cpu?ms=500" in a loop.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: student-app
+  labels:
+    app.kubernetes.io/name: student-app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: student-app
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    # Scale up fast (traffic spikes hurt users now), scale down slowly (avoid flapping).
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60

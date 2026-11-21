@@ -1,0 +1,109 @@
+---
+- name: Install baseline packages
+  ansible.builtin.dnf:
+    name: "{{ common_packages }}"
+    state: present
+
+# Same thing `timedatectl set-timezone` does on systemd hosts, without needing community.general.
+- name: Set the timezone
+  ansible.builtin.file:
+    src: "/usr/share/zoneinfo/{{ common_timezone }}"
+    dest: /etc/localtime
+    state: link
+    force: true
+
+# ---------------------------------------------------------------- swap
+# Written to a temp name and renamed only after mkswap succeeded: /swapfile either does not
+# exist or is a valid swap area, so `creates:` is a safe idempotency guard. user-data.sh makes
+# the same file on stack 20, in which case this is a no-op.
+- name: Create and format the swap file
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      fallocate -l {{ common_swap_size_mb }}M {{ common_swap_file }}.tmp
+      chmod 600 {{ common_swap_file }}.tmp
+      mkswap {{ common_swap_file }}.tmp
+      mv {{ common_swap_file }}.tmp {{ common_swap_file }}
+    executable: /bin/bash
+    creates: "{{ common_swap_file }}"
+  when: common_swap_enabled | bool
+
+- name: Persist the swap file in fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '^{{ common_swap_file }}\s'
+    line: "{{ common_swap_file }} none swap sw 0 0"
+  when: common_swap_enabled | bool
+
+- name: List active swap areas
+  ansible.builtin.command:
+    cmd: swapon --show=NAME --noheadings
+  register: common_active_swap
+  changed_when: false
+  check_mode: false # read-only probe: must also run under --check, the next task reads its output
+  when: common_swap_enabled | bool
+
+- name: Activate the swap file
+  ansible.builtin.command:
+    cmd: "swapon {{ common_swap_file }}"
+  changed_when: true
+  when:
+    - common_swap_enabled | bool
+    - common_swap_file not in common_active_swap.stdout_lines
+
+# ---------------------------------------------------------------- kernel + journald
+- name: Configure kernel parameters
+  ansible.builtin.template:
+    src: sysctl.conf.j2
+    dest: /etc/sysctl.d/90-student-app.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Apply sysctl settings
+
+- name: Create the journald drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Cap the journal size
+  ansible.builtin.template:
+    src: journald.conf.j2
+    dest: /etc/systemd/journald.conf.d/50-student-app.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart journald
+
+# ---------------------------------------------------------------- security updates
+- name: Install dnf-automatic
+  ansible.builtin.dnf:
+    name: dnf-automatic
+    state: present
+  when: common_auto_updates | bool
+
+- name: Configure dnf-automatic
+  ansible.builtin.lineinfile:
+    path: /etc/dnf/automatic.conf
+    regexp: "^{{ item.key }}\\s*="
+    line: "{{ item.key }} = {{ item.value }}"
+    insertafter: '^\[commands\]'
+  loop:
+    - { key: upgrade_type, value: "{{ common_auto_updates_type }}" }
+    - { key: download_updates, value: "yes" }
+    - { key: apply_updates, value: "yes" }
+  loop_control:
+    label: "{{ item.key }}"
+  when: common_auto_updates | bool
+
+# No automatic reboot: kernel fixes land with the next golden AMI / instance refresh (scenario 43/44),
+# which is how immutable fleets are patched.
+- name: Enable the dnf-automatic timer
+  ansible.builtin.systemd_service:
+    name: dnf-automatic.timer
+    enabled: true
+    state: started
+  when: common_auto_updates | bool

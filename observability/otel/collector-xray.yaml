@@ -1,0 +1,50 @@
+# OpenTelemetry Collector → AWS X-Ray (scenario 72). Runs as a sidecar in the ECS task
+# (or a DaemonSet / Deployment on EKS); the app sends OTLP to localhost:4318.
+# Image: otel/opentelemetry-collector-contrib:0.165.0 (awsxray is a contrib component).
+# AWS's own distribution (ADOT, public.ecr.aws/aws-observability/aws-otel-collector) ships
+# the same components. IAM: the task role needs xray:PutTraceSegments,
+# xray:PutTelemetryRecords, xray:GetSamplingRules/Targets (managed policy AWSXrayWriteOnlyAccess).
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Protect the task: refuse data before the collector itself gets OOM-killed.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  # Adds cloud.*, aws.ecs.* / host.* resource attributes (X-Ray shows them as metadata).
+  resourcedetection:
+    detectors: [env, ecs, ec2]
+    timeout: 5s
+    override: false
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+
+exporters:
+  awsxray:
+    region: ${env:AWS_REGION}
+    # Searchable in X-Ray (annotations); everything else becomes metadata.
+    indexed_attributes: [http.route, deployment.environment.name, service.version]
+  # Prints a one-line summary per batch to the collector log: proves data is flowing.
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, batch]
+      exporters: [awsxray, debug]

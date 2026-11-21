@@ -1,0 +1,73 @@
+{{- if .Values.rollout.enabled }}
+{{- $fullname := include "student-app.fullname" . }}
+# Canary gate (scenarios 67–68): 5xx ratio of the NEW pods only, on app routes only — probes, /metrics
+# and /sre-lab are excluded exactly like the availability SLI (CONVENTIONS §5). Health checks keep
+# passing on a bad release (SRE_FAULT_ERROR_RATE), so only this metric can catch it.
+# New pods are selected by name: Rollout pods are called <rollout>-<pod-template-hash>-<suffix>, and the
+# `pod` label exists with every scrape setup (annotation job on kind, the observability PodMonitor or
+# this chart's ServiceMonitor on EKS) — no relabelling of the hash label required.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: {{ $fullname }}-error-rate
+  labels:
+    {{- include "student-app.labels" . | nindent 4 }}
+spec:
+  args:
+    - name: namespace
+    - name: canary-hash
+  metrics:
+    - name: error-rate
+      interval: {{ .Values.analysis.interval }}
+      {{- with .Values.analysis.initialDelay }}
+      initialDelay: {{ . }}
+      {{- end }}
+      failureLimit: {{ .Values.analysis.failureLimit }}
+      # Fail closed: no series at all for the canary (scraping broken, wrong labels) = empty result =
+      # measurement Error; after consecutiveErrorLimit+1 errors the analysis errors and the rollout aborts.
+      consecutiveErrorLimit: 4
+      # NaN = 0/0: series exist but no request reached the canary in the window — nothing to judge.
+      # (A production gate would also require a minimum request count.)
+      successCondition: "isNaN(result[0]) || result[0] <= {{ .Values.analysis.maxErrorRate }}"
+      provider:
+        prometheus:
+          address: {{ .Values.analysis.prometheus.address | quote }}
+          timeout: {{ .Values.analysis.prometheus.timeout }}
+          # `errors or 0 * total`: a healthy canary has no 5xx series yet → 0, while a canary with no
+          # series at all stays empty (see above). Same pattern as observability/k8s/prometheusrule-slo.yaml.
+          # A ratio is immune to double scraping (PodMonitor + ServiceMonitor count both sides twice).
+          query: |
+            (
+              sum(rate(student_app_http_requests_total{namespace="{{`{{args.namespace}}`}}", pod=~".+-{{`{{args.canary-hash}}`}}-.+", status=~"5..", route!~"sre-lab\\..*|health\\.ready|up|metrics"}[{{ .Values.analysis.rateWindow }}]))
+              or
+              0 * sum(rate(student_app_http_requests_total{namespace="{{`{{args.namespace}}`}}", pod=~".+-{{`{{args.canary-hash}}`}}-.+", route!~"sre-lab\\..*|health\\.ready|up|metrics"}[{{ .Values.analysis.rateWindow }}]))
+            )
+            /
+            sum(rate(student_app_http_requests_total{namespace="{{`{{args.namespace}}`}}", pod=~".+-{{`{{args.canary-hash}}`}}-.+", route!~"sre-lab\\..*|health\\.ready|up|metrics"}[{{ .Values.analysis.rateWindow }}]))
+---
+# Blue-green pre-promotion gate (scenario 67): the preview Service must answer /ready with
+# status "ready" (DB reachable) N times in a row before anyone can promote.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: {{ $fullname }}-ready
+  labels:
+    {{- include "student-app.labels" . | nindent 4 }}
+spec:
+  args:
+    - name: service
+    - name: namespace
+  metrics:
+    - name: ready
+      count: {{ .Values.analysis.web.count }}
+      interval: {{ .Values.analysis.web.interval }}
+      failureLimit: 0
+      # A 503 is a measurement *error* for the web provider; 3 in a row fails the analysis.
+      consecutiveErrorLimit: 2
+      successCondition: result == "ready"
+      provider:
+        web:
+          url: "http://{{`{{args.service}}`}}.{{`{{args.namespace}}`}}.svc.cluster.local:{{ .Values.service.port }}/ready"
+          jsonPath: "{$.status}"
+          timeoutSeconds: 5
+{{- end }}

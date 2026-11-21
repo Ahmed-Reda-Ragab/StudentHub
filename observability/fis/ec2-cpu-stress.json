@@ -1,0 +1,54 @@
+{
+  "description": "student-app-lab: 5 minutes of 80% CPU stress (stress-ng via SSM AWSFIS-Run-CPU-Stress) on half of the ASG instances. Hypothesis: CPU target tracking scales out, p95 stays < 300ms (or recovers within 5 minutes) and no request fails.",
+  "roleArn": "arn:aws:iam::<ACCOUNT_ID>:role/student-app-lab-fis",
+  "stopConditions": [
+    {
+      "source": "aws:cloudwatch:alarm",
+      "value": "arn:aws:cloudwatch:<REGION>:<ACCOUNT_ID>:alarm:student-app-lab-alb-latency-p95"
+    },
+    {
+      "source": "aws:cloudwatch:alarm",
+      "value": "arn:aws:cloudwatch:<REGION>:<ACCOUNT_ID>:alarm:student-app-lab-slo-fast-burn"
+    }
+  ],
+  "targets": {
+    "halfOfTheInstances": {
+      "resourceType": "aws:ec2:instance",
+      "resourceTags": {
+        "aws:autoscaling:groupName": "student-app-lab-blue"
+      },
+      "filters": [
+        {
+          "path": "State.Name",
+          "values": ["running"]
+        }
+      ],
+      "selectionMode": "PERCENT(50)"
+    }
+  },
+  "actions": {
+    "cpuStress": {
+      "actionId": "aws:ssm:send-command",
+      "description": "Needs the SSM agent + AmazonSSMManagedInstanceCore on the instance profile (Amazon Linux 2023 has the agent).",
+      "parameters": {
+        "documentArn": "arn:aws:ssm:<REGION>::document/AWSFIS-Run-CPU-Stress",
+        "documentParameters": "{\"DurationSeconds\":\"300\",\"CPU\":\"0\",\"LoadPercent\":\"80\",\"InstallDependencies\":\"True\"}",
+        "duration": "PT6M"
+      },
+      "targets": {
+        "Instances": "halfOfTheInstances"
+      }
+    }
+  },
+  "experimentOptions": {
+    "accountTargeting": "single-account",
+    "emptyTargetResolutionMode": "fail"
+  },
+  "tags": {
+    "Project": "student-app",
+    "Env": "lab",
+    "ManagedBy": "console",
+    "Scenario": "75",
+    "Name": "student-app-lab-ec2-cpu-stress"
+  }
+}

@@ -1,0 +1,38 @@
+---
+# Canary on one host (scenario 24): STEPS percent of traffic to the new color, each step judged by
+# the canary's own 5xx ratio (its /metrics); over MAX_ERROR_RATE => automatic abort (exit 2) and
+# 100% back on stable. First run on a host = bin/init.sh (blue).
+#
+# A canary needs traffic to judge. In another terminal:  deploy/scripts/probe.sh http://<host>/login 0 0.05
+#
+#   ansible-playbook playbooks/canary.yml -e app_image=<ecr>/student-app:<sha>
+#   ansible-playbook playbooks/canary.yml -e app_image=... \
+#     -e 'nginx_lb_canary_steps="25 50 100"' -e nginx_lb_canary_step_seconds=60 -e nginx_lb_canary_max_error_rate=0.02
+#   # bad-release drill: the gate must abort it
+#   ansible-playbook playbooks/canary.yml -e app_image=... \
+#     -e nginx_lb_slot_env=SRE_FAULT_ERROR_RATE=0.5 -e nginx_lb_canary_expect_abort=true
+- name: Canary release on the single-host stack
+  hosts: "{{ target_hosts | default('role_app:&standalone') }}"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Copy the compose file and deploy scripts
+      ansible.builtin.include_role:
+        name: app
+        tasks_from: files
+
+    - name: Render app.env and mysql.env
+      ansible.builtin.include_role:
+        name: app
+        tasks_from: env
+
+    - name: Sync the lb stack
+      ansible.builtin.include_role:
+        name: nginx_lb
+
+    - name: Release with bin/canary.sh
+      ansible.builtin.include_role:
+        name: nginx_lb
+        tasks_from: release
+      vars:
+        nginx_lb_strategy: canary

@@ -1,0 +1,86 @@
+{{- $fullname := include "student-app.fullname" . }}
+{{- $canaryAlb := and .Values.rollout.enabled (eq .Values.rollout.strategy "canary") .Values.rollout.canary.trafficRouting.alb.enabled }}
+{{- $blueGreen := and .Values.rollout.enabled (eq .Values.rollout.strategy "blueGreen") }}
+# Main Service: every Ready pod (Deployment / basic canary), the stable pods (ALB canary) or the
+# active pods (blue-green) — Argo Rollouts adds the pod-template-hash to the selector at runtime.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "student-app.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "student-app.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePort }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
+{{- if $canaryAlb }}
+---
+# Canary Service: Argo Rollouts points it at the canary ReplicaSet; the ALB sends it setWeight %.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-canary
+  labels:
+    {{- include "student-app.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "student-app.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}
+{{- if $blueGreen }}
+---
+# Preview Service: the new (green) ReplicaSet before promotion — smoke-test it, analysis hits it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-preview
+  labels:
+    {{- include "student-app.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "student-app.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}
+{{- if .Values.serviceMonitor.enabled }}
+---
+# Scrape-only headless Service: Argo Rollouts never rewrites its selector, so the ServiceMonitor
+# sees canary, stable, preview and active pods alike (one target per pod).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-metrics
+  labels:
+    {{- include "student-app.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+spec:
+  clusterIP: None
+  selector:
+    {{- include "student-app.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+{{- end }}

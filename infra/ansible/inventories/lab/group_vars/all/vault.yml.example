@@ -1,0 +1,20 @@
+---
+# ansible-vault alternative to SSM (scenario 93). Only read when app_env_source=vault.
+#
+#   cp vault.yml.example vault.yml                     # vault.yml is git-ignored in this lab
+#   $EDITOR vault.yml                                  # put real values
+#   ansible-vault encrypt vault.yml                    # AES256; the file is now safe at rest
+#   ansible-vault edit vault.yml                       # later edits, never decrypt to disk
+#
+#   echo 'a-long-random-passphrase' > ~/.vault-pass-student-app && chmod 600 ~/.vault-pass-student-app
+#   ansible-playbook playbooks/deploy.yml -e app_env_source=vault -e app_image=... \
+#     --vault-password-file ~/.vault-pass-student-app
+#
+# Convention: every secret is vault_<name> here and referenced from main.yml (app_env_vars), so
+# `grep -r vault_` shows where each secret is used while the values stay encrypted.
+# Generate values with: openssl rand -base64 32   (APP_KEY must be "base64:" + 32 random bytes)
+
+vault_app_key: "base64:CHANGE-ME-openssl-rand-base64-32"
+vault_db_password: "CHANGE-ME"
+vault_mysql_root_password: "CHANGE-ME"
+vault_sre_lab_token: "CHANGE-ME"

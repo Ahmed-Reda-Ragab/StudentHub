@@ -1,0 +1,56 @@
+---
+# Roll back the single-host stack (scenarios 22-24, 33).
+#   lb stack present (bluegreen/canary) -> bin/rollback.sh: instant nginx switch to the other color
+#   Recreate stack                      -> redeploy PREVIOUS_RELEASE with the app role
+#
+#   ansible-playbook playbooks/rollback.yml
+#   ansible-playbook playbooks/rollback.yml -e rollback_stack=recreate   # force one path
+#
+# Migrations are NOT rolled back - that is why they must be backward compatible (scenario 95).
+# ASG fleets roll back by putting the previous IMAGE_URI back (deploy-asg.yml / rolling-asg.yml).
+- name: Roll back to the previous release
+  hosts: "{{ target_hosts | default('role_app:&standalone') }}"
+  become: true
+  gather_facts: false
+  vars:
+    rollback_stack: auto   # auto | lb | recreate
+  tasks:
+    - name: Look for the lb stack state
+      ansible.builtin.stat:
+        path: "{{ app_dir }}/lb/state/release.env"
+      register: rollback_lb_state
+
+    - name: Choose the rollback path
+      ansible.builtin.set_fact:
+        rollback_use_lb: >-
+          {{ rollback_stack == 'lb' or (rollback_stack == 'auto' and rollback_lb_state.stat.exists) }}
+
+    - name: Switch traffic back with bin/rollback.sh
+      ansible.builtin.command:
+        argv:
+          - "{{ app_dir }}/lb/bin/rollback.sh"
+      environment:
+        APP_ENV_FILE: "{{ app_dir }}/app.env"
+        MYSQL_ENV_FILE: "{{ app_dir }}/mysql.env"
+        USE_LOCAL_MYSQL: "{{ use_local_mysql | bool | string | lower }}"
+      register: rollback_lb
+      changed_when: true
+      when: rollback_use_lb | bool
+
+    - name: Show the rollback log
+      ansible.builtin.debug:
+        var: rollback_lb.stdout_lines
+      when: rollback_lb is not skipped
+
+    - name: Read PREVIOUS_RELEASE
+      ansible.builtin.slurp:
+        src: "{{ app_dir }}/PREVIOUS_RELEASE"
+      register: rollback_previous
+      when: not rollback_use_lb | bool
+
+    - name: Redeploy the previous release
+      ansible.builtin.include_role:
+        name: app
+      vars:
+        app_image: "{{ (rollback_previous.content | b64decode).strip() }}"
+      when: not rollback_use_lb | bool

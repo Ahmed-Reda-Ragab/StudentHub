@@ -1,0 +1,14 @@
+# Loads every JSON file in observability/grafana/dashboards (mounted read-only) into the
+# "Student App" folder. Edit the JSON in git, not in the UI: UI changes are allowed for
+# experiments (allowUiUpdates) but are overwritten on the next reload/restart.
+apiVersion: 1
+
+providers:
+  - name: student-app
+    folder: Student App
+    type: file
+    disableDeletion: true
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards/student-app

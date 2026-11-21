@@ -1,0 +1,43 @@
+---
+# Sync the stack from the repo. state/ (current colors, rendered nginx upstreams) is never in the
+# repo and copy never deletes, so the live routing survives every sync.
+- name: Create the lb directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ nginx_lb_dir }}"
+    - "{{ nginx_lb_dir }}/bin"
+    - "{{ nginx_lb_dir }}/nginx"
+    - "{{ nginx_lb_dir }}/state"
+
+- name: Copy the compose file and nginx config
+  ansible.builtin.copy:
+    src: "{{ nginx_lb_repo_root }}/deploy/ec2/lb/{{ item }}"
+    dest: "{{ nginx_lb_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - docker-compose.yml
+    - nginx/
+
+# Separate copy with an explicit mode: a checkout made on Windows loses the executable bit.
+- name: Copy the release scripts
+  ansible.builtin.copy:
+    src: "{{ nginx_lb_repo_root }}/deploy/ec2/lb/bin/"
+    dest: "{{ nginx_lb_dir }}/bin/"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write lb.env for manual runs
+  ansible.builtin.template:
+    src: lb.env.j2
+    dest: "{{ nginx_lb_dir }}/lb.env"
+    owner: root
+    group: root
+    mode: "0644"

@@ -1,0 +1,155 @@
+# Blue-green with Argo Rollouts — standalone teaching example (scenario 67).
+#
+# Prerequisites: Argo Rollouts installed; the plain manifests applied (this example reuses their
+# ConfigMap "student-app-config", Secret "student-app-secrets", ServiceAccount and NetworkPolicy);
+# analysis-web.yaml and analysis-prometheus.yaml applied.
+#
+#   kubectl apply -f k8s/rollouts/analysis-web.yaml -f k8s/rollouts/analysis-prometheus.yaml
+#   kubectl apply -f k8s/rollouts/bluegreen.yaml
+#   kubectl argo rollouts set image student-app-bg app=student-app:ci-v2 -n student-app
+#   kubectl argo rollouts get rollout student-app-bg -n student-app --watch
+#   kubectl -n student-app port-forward svc/student-app-bg-preview 8081:80   # test green privately
+#   kubectl argo rollouts promote student-app-bg -n student-app              # switch, one step
+#   kubectl argo rollouts undo student-app-bg -n student-app                 # instant rollback window
+#
+# The production chart renders the same thing with -f values-bluegreen.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: student-app-bg-active
+  namespace: student-app
+  labels:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: bluegreen-demo
+spec:
+  # Users → active. Argo Rollouts adds rollouts-pod-template-hash=<blue hash> to this selector and
+  # swaps it to the green hash on promotion: an atomic switch, no mixed versions.
+  selector:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: bluegreen-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: student-app-bg-preview
+  namespace: student-app
+  labels:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: bluegreen-demo
+spec:
+  # Testers / analysis → preview (the new ReplicaSet before promotion).
+  selector:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: bluegreen-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: student-app-bg
+  namespace: student-app
+  labels:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: bluegreen-demo
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  # Green never gets Ready (boot failure, unhealthy) → abort automatically, blue keeps serving.
+  progressDeadlineSeconds: 300
+  progressDeadlineAbort: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: student-app
+      app.kubernetes.io/component: bluegreen-demo
+  strategy:
+    blueGreen:
+      activeService: student-app-bg-active
+      previewService: student-app-bg-preview
+      # Promotion is a human decision (or a pipeline step) after looking at the preview.
+      autoPromotionEnabled: false
+      # Gate BEFORE the switch: preview must answer /ready = "ready" 3×. Failure → aborted, no switch.
+      prePromotionAnalysis:
+        templates:
+          - templateName: ready-check
+        args:
+          - name: service
+            value: student-app-bg-preview
+      # Gate AFTER the switch: real traffic on green, judged by its error rate. Failure → traffic
+      # goes back to blue, which is still running thanks to scaleDownDelaySeconds.
+      postPromotionAnalysis:
+        templates:
+          - templateName: error-rate
+        args:
+          - name: canary-hash
+            valueFrom:
+              podTemplateHashValue: Latest
+      # Keep blue for 2 min after the switch: instant rollback + lets kube-proxy/ALB finish moving.
+      scaleDownDelaySeconds: 120
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: student-app
+        app.kubernetes.io/component: bluegreen-demo
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: student-app
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 82
+        runAsGroup: 82
+        fsGroup: 82
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: student-app:ci-v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: student-app-config
+            - secretRef:
+                name: student-app-secrets
+          env:
+            # Shows which side answered in /ready and student_app_app_info{color}.
+            - name: DEPLOY_COLOR
+              value: blue
+          startupProbe:
+            httpGet: {path: /up, port: http}
+            periodSeconds: 2
+            failureThreshold: 45
+          livenessProbe:
+            httpGet: {path: /up, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]

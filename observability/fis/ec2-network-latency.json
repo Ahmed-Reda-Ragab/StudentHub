@@ -1,0 +1,50 @@
+{
+  "description": "student-app-lab: add 200ms network latency (tc via SSM AWSFIS-Run-Network-Latency) on one app instance for 5 minutes. Hypothesis: the latency SLO burn-rate alert fires for that slice of traffic, availability is unaffected, and everything recovers when the action ends.",
+  "roleArn": "arn:aws:iam::<ACCOUNT_ID>:role/student-app-lab-fis",
+  "stopConditions": [
+    {
+      "source": "aws:cloudwatch:alarm",
+      "value": "arn:aws:cloudwatch:<REGION>:<ACCOUNT_ID>:alarm:student-app-lab-slo-fast-burn"
+    }
+  ],
+  "targets": {
+    "oneInstance": {
+      "resourceType": "aws:ec2:instance",
+      "resourceTags": {
+        "aws:autoscaling:groupName": "student-app-lab-blue"
+      },
+      "filters": [
+        {
+          "path": "State.Name",
+          "values": ["running"]
+        }
+      ],
+      "selectionMode": "COUNT(1)"
+    }
+  },
+  "actions": {
+    "networkLatency": {
+      "actionId": "aws:ssm:send-command",
+      "description": "Amazon Linux 2023 names the primary NIC ens5, not eth0 (the document default). Check with `ip -br link`.",
+      "parameters": {
+        "documentArn": "arn:aws:ssm:<REGION>::document/AWSFIS-Run-Network-Latency",
+        "documentParameters": "{\"DelayMilliseconds\":\"200\",\"Interface\":\"ens5\",\"DurationSeconds\":\"300\",\"InstallDependencies\":\"True\"}",
+        "duration": "PT6M"
+      },
+      "targets": {
+        "Instances": "oneInstance"
+      }
+    }
+  },
+  "experimentOptions": {
+    "accountTargeting": "single-account",
+    "emptyTargetResolutionMode": "fail"
+  },
+  "tags": {
+    "Project": "student-app",
+    "Env": "lab",
+    "ManagedBy": "console",
+    "Scenario": "75",
+    "Name": "student-app-lab-ec2-network-latency"
+  }
+}

@@ -1,0 +1,23 @@
+---
+# Docker Engine comes from the AL2023 repo ("docker" package). Compose v2 and Buildx are not
+# packaged there, so they are installed as CLI plugins from GitHub releases - pinned, so every
+# host (and every golden AMI) runs the same versions. Compose matches deploy/ec2/user-data.sh.
+docker_compose_version: v2.39.4
+docker_buildx_version: v0.39.1
+# Optional supply-chain check: sha256 of the binaries for your arch (from the release page).
+docker_compose_sha256: ""
+docker_buildx_sha256: ""
+
+docker_cli_plugins_dir: /usr/local/lib/docker/cli-plugins
+docker_plugin_store: /opt/docker-cli-plugins   # versioned binaries; the plugins dir symlinks to them
+
+# Default logging for containers that do not set their own (compose files already do).
+docker_log_max_size: 10m
+docker_log_max_file: "3"
+
+# live-restore: containers keep running while dockerd restarts (dnf-automatic upgrading the
+# docker package, a daemon.json change). Without it a daemon restart = an app outage.
+docker_live_restore: true
+
+docker_users:
+  - ec2-user

@@ -1,0 +1,22 @@
+---
+# CloudWatch agent (scenarios 70, 71). The instance profiles of stacks 20/40 attach
+# CloudWatchAgentServerPolicy (PutMetricData, CreateLogGroup/Stream, PutLogEvents).
+cloudwatch_agent_env_name: "{{ env_name | default('lab') }}"
+cloudwatch_agent_log_group_prefix: "/student-app/{{ cloudwatch_agent_env_name }}/ec2"
+# Agent-created log groups are NOT managed by Terraform and survive `terraform destroy`:
+# a retention keeps forgotten groups from costing money forever.
+cloudwatch_agent_log_retention_days: 7
+cloudwatch_agent_metrics_interval: 60
+cloudwatch_agent_config_path: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+# json-file logs of every container (the default driver, see the docker role). Containers using
+# the awslogs driver (stack 40 user data, compose.awslogs.yml) ship directly and are not duplicated.
+cloudwatch_agent_log_files:
+  - file_path: /var/lib/docker/containers/*/*-json.log
+    log_group_name: "{{ cloudwatch_agent_log_group_prefix }}/docker"
+    log_stream_name: "{instance_id}"
+    # one stream per matching file instead of only the most recently modified one
+    publish_multi_logs: true
+  - file_path: /var/log/cloud-init-output.log   # user-data / boot problems (scenario 42)
+    log_group_name: "{{ cloudwatch_agent_log_group_prefix }}/cloud-init"
+    log_stream_name: "{instance_id}"

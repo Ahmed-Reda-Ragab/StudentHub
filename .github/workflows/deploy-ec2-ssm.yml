@@ -1,0 +1,493 @@
+# CD -> EC2 single host with ECR + SSM Run Command (scenario 32). Also the shared deploy engine
+# behind deploy-ec2-bluegreen.yml (23), deploy-ec2-canary.yml (24) and release-promote.yml (34).
+#
+# Why SSM instead of SSH (compare deploy-ec2-ssh-build.yml, scenario 31): no inbound port, no
+# long-lived key in GitHub, every command authorised by IAM (OIDC role, scoped to instances tagged
+# Project=student-app) and recorded in CloudTrail + the SSM command history. Build once in CI,
+# deploy the same scanned image everywhere.
+#
+#   1. tag -> digest in ECR (fail fast if CI never pushed it; release-promote pins the digest)
+#   2. ship docker-compose.prod.yml + deploy/ec2 scripts of THIS commit inside the command
+#   3. run deploy-pull-image.sh (recreate) or lb/bin/bluegreen.sh | canary.sh on the host
+#   4. poll the command, print stdout/stderr, smoke-test APP_URL, write a job summary
+#
+# Variables (repo or environment scoped - environment values win, so lab/production can differ):
+#   AWS_DEPLOY_ROLE_ARN, AWS_REGION, ECR_REPOSITORY, EC2_INSTANCE_ID (stack 20 output instance_id),
+#   EC2_TARGET_SCENARIO (tag target when EC2_INSTANCE_ID is empty, default 20), APP_URL,
+#   ENV_NAME (SSM prefix /student-app/<ENV_NAME>/..., defaults to the environment name),
+#   EC2_CONTINUOUS_DEPLOY ("true" = deploy automatically after every green CI run on main/master)
+name: Deploy EC2 (SSM)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag in ECR (git short SHA). Empty = this commit's short SHA."
+        type: string
+        default: ""
+      use_local_mysql:
+        description: "MySQL runs as a container on the host (stack 20). Untick when DB_HOST is RDS."
+        type: boolean
+        default: true
+  # Continuous deployment: every successful CI run on main/master (CI pushed the image to ECR).
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main, master]
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        default: lab
+      image_tag:
+        type: string
+        default: ""
+      expected_digest:
+        description: "Fail unless the tag resolves to this digest (promotion of the exact bytes tested in lab)."
+        type: string
+        default: ""
+      strategy:
+        description: "recreate | bluegreen | canary"
+        type: string
+        default: recreate
+      use_local_mysql:
+        type: boolean
+        default: true
+      slot_env:
+        description: "Extra env for the NEW color only (bad-release drills), e.g. SRE_FAULT_ERROR_RATE=0.5"
+        type: string
+        default: ""
+      keep_old:
+        type: boolean
+        default: true
+      drain_seconds:
+        type: string
+        default: "10"
+      canary_steps:
+        type: string
+        default: "10 25 50 100"
+      step_seconds:
+        type: string
+        default: "60"
+      max_error_rate:
+        type: string
+        default: "0.01"
+      min_requests:
+        type: string
+        default: "10"
+      expect_abort:
+        description: "Drill mode: an aborted canary is the expected (passing) outcome."
+        type: boolean
+        default: false
+      generate_traffic:
+        description: "Send real-page traffic from the runner during the release (a canary needs data)."
+        type: boolean
+        default: false
+    outputs:
+      image_uri:
+        description: "Deployed image (repo:tag@digest)"
+        value: ${{ jobs.deploy.outputs.image_uri }}
+      image_digest:
+        description: "sha256 digest of the deployed image"
+        value: ${{ jobs.deploy.outputs.image_digest }}
+      outcome:
+        description: "deployed | aborted | failed"
+        value: ${{ jobs.deploy.outputs.outcome }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    name: ${{ inputs.strategy || 'recreate' }} -> ${{ inputs.environment || 'lab' }}
+    # workflow_run: only successful pushes of THIS repo (a fork PR from a branch named "main"
+    # must never trigger a deploy).
+    # Continuous deployment is opt-in (variable EC2_CONTINUOUS_DEPLOY=true): the lab host only exists
+    # while stack 20 is applied, and a deploy to nothing would just be a red run on every push.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (vars.EC2_CONTINUOUS_DEPLOY == 'true' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment:
+      name: ${{ inputs.environment || 'lab' }}
+      url: ${{ vars.APP_URL }}
+    # One deploy per host at a time, shared with the ssh / ansible / bluegreen / canary workflows.
+    # Never cancel a running deploy (half-migrated hosts); a newer queued run replaces an older queued one.
+    concurrency:
+      group: deploy-${{ inputs.environment || 'lab' }}-ec2-single
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image_uri: ${{ steps.image.outputs.uri }}
+      image_digest: ${{ steps.image.outputs.digest }}
+      outcome: ${{ steps.run.outputs.outcome }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'student-app' }}
+      DEPLOY_ENV: ${{ inputs.environment || 'lab' }}
+      ENV_NAME: ${{ vars.ENV_NAME || inputs.environment || 'lab' }}
+      APP_URL: ${{ vars.APP_URL }}
+      STRATEGY: ${{ inputs.strategy || 'recreate' }}
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      # booleans: workflow_run has no inputs (null) -> fall back to the documented defaults
+      USE_LOCAL_MYSQL: ${{ inputs.use_local_mysql == false && 'false' || 'true' }}
+      KEEP_OLD: ${{ inputs.keep_old == false && 'false' || 'true' }}
+      EXPECT_ABORT: ${{ inputs.expect_abort == true && 'true' || 'false' }}
+      GENERATE_TRAFFIC: ${{ inputs.generate_traffic == true && 'true' || 'false' }}
+      SLOT_ENV: ${{ inputs.slot_env }}
+      DRAIN_SECONDS: ${{ inputs.drain_seconds || '10' }}
+      CANARY_STEPS: ${{ inputs.canary_steps || '10 25 50 100' }}
+      STEP_SECONDS: ${{ inputs.step_seconds || '60' }}
+      MAX_ERROR_RATE: ${{ inputs.max_error_rate || '0.01' }}
+      MIN_REQUESTS: ${{ inputs.min_requests || '10' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      # Inputs end up in a shell script on the server: whitelist their shape (no injection).
+      - name: Validate inputs
+        id: inputs
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          case "$STRATEGY" in recreate|bluegreen|canary) ;; *) fail "strategy must be recreate|bluegreen|canary" ;; esac
+          [[ "$CANARY_STEPS" =~ ^[0-9]{1,3}( [0-9]{1,3})*$ ]] || fail "canary_steps: space-separated percentages"
+          for n in "$STEP_SECONDS" "$MIN_REQUESTS" "$DRAIN_SECONDS"; do
+            [[ "$n" =~ ^[0-9]{1,5}$ ]] || fail "not a number: $n"
+          done
+          [[ "$MAX_ERROR_RATE" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] || fail "max_error_rate must be between 0 and 1"
+          kv='[A-Z_][A-Z0-9_]*=[A-Za-z0-9._:/-]*'
+          [[ -z "$SLOT_ENV" || "$SLOT_ENV" =~ ^$kv( $kv)*$ ]] || fail "slot_env: KEY=value pairs separated by spaces"
+          tag="${IMAGE_TAG:-${SOURCE_SHA::7}}"
+          [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]] || fail "invalid image tag: $tag"
+          [[ "$tag" != latest ]] || fail "':latest' is never deployed - use the immutable SHA tag (CONVENTIONS §2)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: deploy-ec2-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Environment variables override repo variables, but a MISSING environment variable silently
+      # falls back to the repo (= lab) value. A production promote must never land on the lab host.
+      - name: Guard - never deploy across environments
+        env:
+          SCOPED_ENV_NAME: ${{ vars.ENV_NAME }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+        run: |
+          if [[ "$DEPLOY_ENV" != "lab" && "$SCOPED_ENV_NAME" != "$DEPLOY_ENV" ]]; then
+            echo "::error::environment '$DEPLOY_ENV' must define its own variable ENV_NAME=$DEPLOY_ENV (plus EC2_INSTANCE_ID, APP_URL) - refusing to fall back to repo-level (lab) values"
+            exit 1
+          fi
+          if [[ -n "$EC2_INSTANCE_ID" ]]; then
+            tag_env=$(aws ec2 describe-instances --instance-ids "$EC2_INSTANCE_ID" \
+              --query "Reservations[0].Instances[0].Tags[?Key=='Env'].Value | [0]" --output text)
+            if [[ "$tag_env" != "$ENV_NAME" ]]; then
+              echo "::error::instance $EC2_INSTANCE_ID is tagged Env=$tag_env but this deploy targets ENV_NAME=$ENV_NAME - refusing"
+              exit 1
+            fi
+            echo "target $EC2_INSTANCE_ID is tagged Env=$tag_env ✔"
+          fi
+
+      - name: Resolve the image digest in ECR
+        id: image
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+          EXPECTED_DIGEST: ${{ inputs.expected_digest }}
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          repo="$account.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY"
+          if ! digest=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+                --image-ids imageTag="$TAG" --query 'imageDetails[0].imageDigest' --output text); then
+            echo "::error::$ECR_REPOSITORY:$TAG is not in ECR - did CI (ci.yml) push it?"
+            exit 1
+          fi
+          if [[ -n "$EXPECTED_DIGEST" && "$digest" != "$EXPECTED_DIGEST" ]]; then
+            echo "::error::$TAG resolves to $digest, expected $EXPECTED_DIGEST - refusing to promote different bytes"
+            exit 1
+          fi
+          # tag for humans, digest for the machine: what runs is exactly what CI scanned.
+          {
+            echo "uri=$repo:$TAG@$digest"
+            echo "digest=$digest"
+          } >> "$GITHUB_OUTPUT"
+          echo "image: $repo:$TAG@$digest"
+
+      - name: Resolve the SSM targets
+        id: targets
+        env:
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          TARGET_SCENARIO: ${{ vars.EC2_TARGET_SCENARIO || '20' }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$EC2_INSTANCE_ID" ]]; then
+            targets=$(jq -nc --arg id "$EC2_INSTANCE_ID" '[{Key: "InstanceIds", Values: [$id]}]')
+          else
+            # Same tags Terraform puts on the stack 20 host (Role=app, Scenario=20).
+            targets=$(jq -nc --arg env "$ENV_NAME" --arg sc "$TARGET_SCENARIO" '[
+              {Key: "tag:Project", Values: ["student-app"]}, {Key: "tag:Env", Values: [$env]},
+              {Key: "tag:Role", Values: ["app"]}, {Key: "tag:Scenario", Values: [$sc]}]')
+          fi
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+          echo "targets: $targets"
+
+      - name: Build the remote script
+        env:
+          IMAGE: ${{ steps.image.outputs.uri }}
+        run: |
+          set -euo pipefail
+          files=(docker-compose.prod.yml deploy/ec2/deploy-pull-image.sh deploy/ec2/render-env-from-ssm.sh
+                 deploy/ec2/backup-mysql-to-s3.sh deploy/ec2/compose.awslogs.yml)
+          [[ "$STRATEGY" == recreate ]] || files+=(deploy/ec2/lb)
+          # Only committed files (git archive): what runs on the host is reviewable in this commit.
+          payload=$(git archive --format=tar.gz HEAD "${files[@]}" | base64 -w0)
+          echo "payload: ${#payload} bytes of base64"
+          # ~5 KB (recreate) / ~18 KB (lb stack). Command parameters are meant for scripts, not
+          # artifacts: if this ever grows past ~40 KB, ship it via S3 (aws s3 cp on the host) instead.
+          (( ${#payload} < 40000 )) || { echo "::error::payload too large for SSM parameters"; exit 1; }
+          {
+            echo '#!/bin/bash'
+            echo "# deploy run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            for var in IMAGE STRATEGY AWS_REGION ENV_NAME USE_LOCAL_MYSQL SLOT_ENV KEEP_OLD DRAIN_SECONDS \
+                       CANARY_STEPS STEP_SECONDS MAX_ERROR_RATE MIN_REQUESTS; do
+              printf '%s=%q\n' "$var" "${!var}"
+            done
+            printf 'PAYLOAD=%s\n' "$payload"
+          } > "$RUNNER_TEMP/remote.sh"
+          cat >> "$RUNNER_TEMP/remote.sh" <<'REMOTE'
+          # ---- runs on the instance as root (SSM agent). /bin/sh is bash on Amazon Linux 2023.
+          set -euo pipefail
+          APP_DIR=/opt/student-app
+          LB_DIR="$APP_DIR/lb"
+          export AWS_REGION ENV_NAME USE_LOCAL_MYSQL SLOT_ENV
+          export APP_ENV_FILE="$APP_DIR/app.env" MYSQL_ENV_FILE="$APP_DIR/mysql.env"
+          echo "== $(hostname) $(date -Iseconds) strategy=$STRATEGY image=$IMAGE"
+
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          printf '%s' "$PAYLOAD" | base64 -d | tar -xz -C "$tmp"
+          install -d -m 0755 "$APP_DIR"
+          install -m 0644 "$tmp/docker-compose.prod.yml" "$tmp/deploy/ec2/compose.awslogs.yml" "$APP_DIR/"
+          install -m 0755 "$tmp"/deploy/ec2/*.sh "$APP_DIR/"
+
+          if [ "$STRATEGY" = recreate ]; then
+              if [ -f "$LB_DIR/state/release.env" ]; then
+                  echo "the zero-downtime lb stack owns :80 on this host - deploy with bluegreen/canary instead" >&2
+                  exit 3
+              fi
+              "$APP_DIR/deploy-pull-image.sh" "$IMAGE"
+              exit 0
+          fi
+
+          # ---- zero-downtime stack (deploy/ec2/lb). state/ is not in the payload: live routing survives.
+          mkdir -p "$LB_DIR"
+          cp -R "$tmp/deploy/ec2/lb/." "$LB_DIR/"
+          chmod 0755 "$LB_DIR"/bin/*.sh
+          "$APP_DIR/render-env-from-ssm.sh"
+          aws ecr get-login-password --region "$AWS_REGION" \
+              | docker login --username AWS --password-stdin "${IMAGE%%/*}" >/dev/null
+
+          if [ ! -f "$LB_DIR/state/release.env" ]; then
+              echo "first release on the lb stack: freeing :80 from the Recreate stack, then init.sh"
+              ids=$(docker ps -aq --filter label=com.docker.compose.project=student-app \
+                                  --filter label=com.docker.compose.service=app)
+              if [ -n "$ids" ]; then
+                  # shellcheck disable=SC2086 # word splitting intended: one id per word
+                  docker rm -f $ids
+              fi
+              "$LB_DIR/bin/init.sh" "$IMAGE"
+              exit 0
+          fi
+
+          case "$STRATEGY" in
+              bluegreen)
+                  KEEP_OLD="$KEEP_OLD" DRAIN_SECONDS="$DRAIN_SECONDS" "$LB_DIR/bin/bluegreen.sh" "$IMAGE" ;;
+              canary)
+                  # exit 2 = the error-rate gate aborted the canary; traffic is back on stable
+                  STEPS="$CANARY_STEPS" STEP_SECONDS="$STEP_SECONDS" MAX_ERROR_RATE="$MAX_ERROR_RATE" \
+                  MIN_REQUESTS="$MIN_REQUESTS" "$LB_DIR/bin/canary.sh" "$IMAGE" ;;
+          esac
+          REMOTE
+          bash -n "$RUNNER_TEMP/remote.sh"
+
+      # Measures availability during the release (scenario 22: Recreate has a visible gap,
+      # blue/green and canary must have none). With generate_traffic it hits real pages, so the
+      # canary's metric gate has data to judge.
+      - name: Start the availability probe
+        if: env.APP_URL != ''
+        run: |
+          set -euo pipefail
+          url="$APP_URL/ready" interval=0.2
+          if [[ "$GENERATE_TRAFFIC" == true ]]; then url="$APP_URL/login" interval=0.05; fi
+          STOP_FILE="$RUNNER_TEMP/probe.stop" OUT="$RUNNER_TEMP/probe.txt" \
+            nohup bash deploy/scripts/probe.sh "$url" 0 "$interval" > "$RUNNER_TEMP/probe.log" 2>&1 &
+          echo "probing $url every ${interval}s"
+
+      - name: Run the deploy via SSM Run Command
+        id: run
+        env:
+          TARGETS_JSON: ${{ steps.targets.outputs.targets }}
+          TAG: ${{ steps.inputs.outputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$STRATEGY" in
+            canary) steps_n=$(wc -w <<<"$CANARY_STEPS"); exec_timeout=$(( 900 + steps_n * STEP_SECONDS * 2 )) ;;
+            *) exec_timeout=1200 ;;
+          esac
+          jq -n --rawfile script "$RUNNER_TEMP/remote.sh" --argjson targets "$TARGETS_JSON" \
+                --arg comment "$STRATEGY $TAG by $GITHUB_ACTOR run $GITHUB_RUN_ID" \
+                --arg timeout "$exec_timeout" --arg logs "/student-app/$ENV_NAME/ssm-deploy" '{
+              DocumentName: "AWS-RunShellScript",
+              Comment: $comment[0:100],
+              Targets: $targets,
+              Parameters: {commands: ($script | rtrimstr("\n") | split("\n")), executionTimeout: [$timeout]},
+              TimeoutSeconds: 600,
+              MaxConcurrency: "1",
+              MaxErrors: "0",
+              CloudWatchOutputConfig: {CloudWatchOutputEnabled: true, CloudWatchLogGroupName: $logs}
+            }' > "$RUNNER_TEMP/send-command.json"
+          # MaxConcurrency 1 + MaxErrors 0: with several matching hosts this is a rolling deploy that
+          # stops at the first failure.
+          cid=$(aws ssm send-command --cli-input-json "file://$RUNNER_TEMP/send-command.json" \
+                  --query Command.CommandId --output text)
+          echo "command_id=$cid" >> "$GITHUB_OUTPUT"
+          echo "SSM command $cid (console: Systems Manager > Run Command > Command history)"
+
+          deadline=$(( SECONDS + exec_timeout + 600 ))
+          while :; do
+            read -r status target_count done_n <<<"$(aws ssm list-commands --command-id "$cid" \
+              --query 'Commands[0].[Status,TargetCount,CompletedCount]' --output text)"
+            echo "$(date +%T) status=$status completed=$done_n/$target_count"
+            case "$status" in Success|Failed|TimedOut|Cancelled) break ;; esac
+            if (( SECONDS > deadline )); then
+              echo "::error::gave up waiting for $cid"
+              aws ssm cancel-command --command-id "$cid" || true   # needs ssm:CancelCommand
+              status=TimedOut
+              break
+            fi
+            sleep 10
+          done
+
+          if [[ "$target_count" == 0 ]]; then
+            echo "::error::no instance matched the targets ($TARGETS_JSON) - check EC2_INSTANCE_ID / tags / SSM agent"
+            echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          outcome=deployed
+          mapfile -t ids < <(aws ssm list-command-invocations --command-id "$cid" \
+                               --query 'CommandInvocations[].InstanceId' --output text | tr '\t' '\n')
+          for id in "${ids[@]}"; do
+            inv=$(aws ssm get-command-invocation --command-id "$cid" --instance-id "$id" --output json)
+            st=$(jq -r .Status <<<"$inv")
+            rc=$(jq -r .ResponseCode <<<"$inv")
+            echo "::group::$id - $st (exit $rc)"
+            jq -r .StandardOutputContent <<<"$inv"
+            echo "----- stderr"
+            jq -r .StandardErrorContent <<<"$inv"
+            echo "::endgroup::"
+            echo "$id $st $rc" >> "$RUNNER_TEMP/invocations.txt"
+            if [[ "$st" != Success ]]; then
+              if [[ "$STRATEGY" == canary && "$rc" == 2 ]]; then outcome=aborted; else outcome=failed; fi
+            fi
+          done
+          # SSM keeps only the first 24,000 chars of output; the full log is in CloudWatch Logs.
+          [[ "$status" == Success || "$outcome" != deployed ]] || outcome=failed
+          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
+          echo "outcome: $outcome"
+
+      - name: Stop the availability probe
+        if: always() && env.APP_URL != ''
+        run: |
+          touch "$RUNNER_TEMP/probe.stop"
+          for _ in $(seq 1 30); do [[ -s "$RUNNER_TEMP/probe.txt" ]] && break; sleep 1; done
+          cat "$RUNNER_TEMP/probe.txt" 2>/dev/null || tail -20 "$RUNNER_TEMP/probe.log" || true
+
+      - name: Smoke test APP_URL
+        id: smoke
+        if: env.APP_URL != '' && steps.run.outputs.outcome != 'failed'
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+          OUTCOME: ${{ steps.run.outputs.outcome }}
+        run: |
+          set -euo pipefail
+          body=""
+          for _ in $(seq 1 24); do
+            body=$(curl -fsS -m 5 "$APP_URL/ready") && break
+            sleep 5
+          done
+          [[ -n "$body" ]] || { echo "::error::$APP_URL/ready did not answer"; exit 1; }
+          echo "$body" | jq .
+          [[ "$(jq -r .status <<<"$body")" == ready ]] || { echo "::error::/ready is not ready"; exit 1; }
+          version=$(jq -r .version <<<"$body")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # APP_VERSION is baked from the short SHA (ci.yml), so it must equal the tag we deployed.
+          if [[ "$OUTCOME" == deployed && "$TAG" =~ ^[0-9a-f]{7}$ && "$version" != "$TAG" ]]; then
+            echo "::error::$APP_URL serves version $version, expected $TAG"
+            exit 1
+          fi
+
+      - name: Job summary
+        if: always()
+        env:
+          IMAGE: ${{ steps.image.outputs.uri }}
+          OUTCOME: ${{ steps.run.outputs.outcome }}
+          COMMAND_ID: ${{ steps.run.outputs.command_id }}
+          SMOKE: ${{ steps.smoke.outcome }}
+          VERSION: ${{ steps.smoke.outputs.version }}
+        run: |
+          {
+            echo "### EC2 deploy via SSM - \`$STRATEGY\` -> \`$DEPLOY_ENV\`"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`${IMAGE:-n/a}\` |"
+            echo "| SSM command | \`${COMMAND_ID:-n/a}\` |"
+            echo "| Outcome | **${OUTCOME:-not run}** |"
+            echo "| Smoke test | ${SMOKE:-skipped} (live version \`${VERSION:-?}\`) |"
+            echo "| URL | ${APP_URL:-APP_URL not set} |"
+            if [[ "$STRATEGY" == canary ]]; then
+              echo "| Canary | steps \`$CANARY_STEPS\`, ${STEP_SECONDS}s each, max error rate $MAX_ERROR_RATE |"
+            fi
+            [[ -z "$SLOT_ENV" ]] || echo "| Drill env (new color only) | \`$SLOT_ENV\` |"
+            if [[ -s "$RUNNER_TEMP/invocations.txt" ]]; then
+              echo; echo '```text'; cat "$RUNNER_TEMP/invocations.txt"; echo '```'
+            fi
+            if [[ -s "$RUNNER_TEMP/probe.txt" ]]; then
+              echo; echo "**Availability during the release**"; echo '```text'; cat "$RUNNER_TEMP/probe.txt"; echo '```'
+            fi
+            if [[ "$OUTCOME" == aborted ]]; then
+              echo
+              echo "> Canary **aborted** by the error-rate gate: 100% of traffic is back on the stable color."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verdict
+        if: always()
+        env:
+          OUTCOME: ${{ steps.run.outputs.outcome }}
+        run: |
+          case "$OUTCOME/$EXPECT_ABORT" in
+            deployed/false) echo "deployed" ;;
+            aborted/true)   echo "drill passed: the gate aborted the bad release" ;;
+            aborted/false)  echo "::error::canary aborted - the release was NOT promoted (see summary)"; exit 1 ;;
+            deployed/true)  echo "::error::drill failed: the bad release was promoted, the gate did not catch it"; exit 1 ;;
+            *)              echo "::error::deploy failed (outcome: ${OUTCOME:-not run})"; exit 1 ;;
+          esac

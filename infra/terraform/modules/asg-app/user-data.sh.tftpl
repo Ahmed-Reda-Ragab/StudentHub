@@ -1,0 +1,114 @@
+#!/bin/bash
+# Rendered by Terraform from infra/terraform/modules/asg-app/user-data.sh.tftpl (scenarios 40-48).
+#
+# Immutable instance boot: [docker] -> app.env from SSM -> image URI from SSM -> docker run.
+# Nothing is ever deployed onto a running instance. A release is:
+#   aws ssm put-parameter --name ${image_parameter_name} --value <ecr-uri>:<sha> --overwrite
+#   aws autoscaling start-instance-refresh --auto-scaling-group-name <asg>
+# Migrations are NOT run here (CONVENTIONS §2: once per release, never per replica).
+# Logs: /var/log/cloud-init-output.log
+set -euo pipefail
+
+APP_DIR=/opt/student-app
+SSM_PREFIX="${ssm_prefix}"
+IMAGE_PARAM="${image_parameter_name}"
+DEPLOY_COLOR="${color}"
+LOG_GROUP="${log_group_name}"
+
+TOKEN=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+imds() { curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
+AWS_REGION=$(imds placement/region)
+INSTANCE_ID=$(imds instance-id)
+export AWS_REGION AWS_DEFAULT_REGION="$AWS_REGION"
+
+# The instance profile and freshly written SSM parameters can lag a few seconds at boot.
+retry() {
+    local n=0
+    until "$@"; do
+        n=$((n + 1))
+        if [ "$n" -ge 10 ]; then echo "giving up: $*" >&2; return 1; fi
+        echo "retry $n: $*" >&2
+        sleep 6
+    done
+}
+
+%{ if install_docker ~}
+# 1) Docker engine (skipped on the Packer golden AMI, scenario 43)
+if ! command -v docker >/dev/null 2>&1; then
+    retry dnf -y install docker
+fi
+%{ endif ~}
+systemctl enable --now docker
+
+%{ if install_codedeploy_agent ~}
+# 1b) CodeDeploy agent + Compose plugin (scenario 37 only: CodeDeploy in-place / blue-green
+#     on this ASG). The hooks in deploy/codedeploy/ec2 run the app with docker compose.
+PLUGINS=/usr/local/lib/docker/cli-plugins
+if [ ! -x "$PLUGINS/docker-compose" ]; then
+    mkdir -p "$PLUGINS"
+    retry curl -fsSL -o "$PLUGINS/docker-compose"         "https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-linux-$(uname -m)"
+    chmod +x "$PLUGINS/docker-compose"
+fi
+if ! systemctl is-active --quiet codedeploy-agent; then
+    retry dnf -y install ruby wget
+    retry wget -q -O /tmp/codedeploy-install "https://aws-codedeploy-$AWS_REGION.s3.$AWS_REGION.amazonaws.com/latest/install"
+    chmod +x /tmp/codedeploy-install
+    retry /tmp/codedeploy-install auto
+fi
+%{ endif ~}
+
+# 2) app.env from SSM — same logic as deploy/ec2/render-env-from-ssm.sh
+render_env() {
+    local tmp
+    tmp=$(mktemp)
+    aws ssm get-parameters-by-path --path "$SSM_PREFIX/" --recursive --with-decryption \
+        --query 'Parameters[*].[Name,Value]' --output text \
+        | while IFS=$'\t' read -r name value; do
+            printf '%s=%s\n' "$${name##*/}" "$value"
+          done > "$tmp"
+    if [ ! -s "$tmp" ]; then
+        rm -f "$tmp"
+        echo "no parameters under $SSM_PREFIX/ yet" >&2
+        return 1
+    fi
+    install -m 600 "$tmp" "$APP_DIR/app.env"
+    rm -f "$tmp"
+    echo "wrote $APP_DIR/app.env ($(wc -l < "$APP_DIR/app.env") keys)"
+}
+mkdir -p "$APP_DIR"
+retry render_env
+
+# 3) Which release? CI owns this parameter (Terraform only created it).
+IMAGE=$(retry aws ssm get-parameter --name "$IMAGE_PARAM" --query Parameter.Value --output text)
+echo "release: $IMAGE (color $DEPLOY_COLOR)"
+
+ecr_login() {
+    local registry="$${IMAGE%%/*}"
+    if [[ "$registry" == *.dkr.ecr.*.amazonaws.com ]]; then
+        aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+    fi
+}
+retry ecr_login
+retry docker pull "$IMAGE"
+
+# 4) Run. Logs go to CloudWatch when a log group is configured (one stream per color/instance).
+LOG_OPTS=(--log-driver json-file --log-opt max-size=10m --log-opt max-file=5)
+if [ -n "$LOG_GROUP" ]; then
+    LOG_OPTS=(--log-driver awslogs
+        --log-opt "awslogs-group=$LOG_GROUP"
+        --log-opt "awslogs-region=$AWS_REGION"
+        --log-opt "awslogs-stream=$DEPLOY_COLOR/$INSTANCE_ID")
+fi
+
+docker rm -f student-app >/dev/null 2>&1 || true
+# SIGQUIT + 30s = graceful PHP-FPM shutdown (CONVENTIONS §2); the ALB drains for 30s first.
+docker run -d --name student-app --restart unless-stopped \
+    -p ${host_port}:${container_port} \
+    --env-file "$APP_DIR/app.env" \
+    -e DEPLOY_COLOR="$DEPLOY_COLOR" \
+    --stop-signal SIGQUIT --stop-timeout 30 \
+    "$${LOG_OPTS[@]}" \
+    "$IMAGE"
+
+echo "$IMAGE" > "$APP_DIR/CURRENT_RELEASE"
+echo "student-app boot finished: $(date -Iseconds)"

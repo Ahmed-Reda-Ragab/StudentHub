@@ -1,0 +1,45 @@
+{
+  "description": "student-app-lab: terminate one running instance of the app Auto Scaling group. Hypothesis: the ALB marks it unhealthy within the health-check window, the ASG launches a replacement from the launch template, users see no more than a few 502s and availability stays >= 99.5%.",
+  "roleArn": "arn:aws:iam::<ACCOUNT_ID>:role/student-app-lab-fis",
+  "stopConditions": [
+    {
+      "source": "aws:cloudwatch:alarm",
+      "value": "arn:aws:cloudwatch:<REGION>:<ACCOUNT_ID>:alarm:student-app-lab-slo-fast-burn"
+    }
+  ],
+  "targets": {
+    "oneAsgInstance": {
+      "resourceType": "aws:ec2:instance",
+      "resourceTags": {
+        "aws:autoscaling:groupName": "student-app-lab-blue"
+      },
+      "filters": [
+        {
+          "path": "State.Name",
+          "values": ["running"]
+        }
+      ],
+      "selectionMode": "COUNT(1)"
+    }
+  },
+  "actions": {
+    "terminateOne": {
+      "actionId": "aws:ec2:terminate-instances",
+      "description": "Hard failure of one host (no graceful drain from the app side).",
+      "targets": {
+        "Instances": "oneAsgInstance"
+      }
+    }
+  },
+  "experimentOptions": {
+    "accountTargeting": "single-account",
+    "emptyTargetResolutionMode": "fail"
+  },
+  "tags": {
+    "Project": "student-app",
+    "Env": "lab",
+    "ManagedBy": "console",
+    "Scenario": "75",
+    "Name": "student-app-lab-asg-terminate-one"
+  }
+}

@@ -1,0 +1,59 @@
+# EKS overlay (scenarios 63–64 in plain YAML): ALB Ingress, secrets from SSM via External Secrets,
+# image from ECR. Prerequisites installed by infra/terraform/stacks/60-eks: AWS Load Balancer
+# Controller, External Secrets Operator (Pod Identity), metrics-server.
+#
+#   cd k8s/manifests/overlays/eks
+#   kustomize edit set image student-app=<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/student-app:<GIT_SHA>
+#   kubectl apply -k .
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - secretstore.yaml
+  - externalsecret.yaml
+  - ingress.yaml
+images:
+  - name: student-app
+    # Placeholders — CI sets both with `kustomize edit set image` (immutable git-SHA tags only).
+    newName: 123456789012.dkr.ecr.us-east-1.amazonaws.com/student-app
+    newTag: "0000000"
+patches:
+  # The AWS Load Balancer Controller injects a readiness gate into pods of labelled namespaces:
+  # a new pod only counts as Ready once the ALB target is healthy, so a rolling update can't
+  # outrun target registration (zero-downtime with target-type ip).
+  - target:
+      kind: Namespace
+      name: student-app
+    patch: |-
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: student-app
+        labels:
+          elbv2.k8s.aws/pod-readiness-gate-inject: enabled
+  # On EKS the RDS module writes DB_HOST/DB_PORT/DB_DATABASE/DB_USERNAME to SSM → they arrive in the
+  # Secret. Drop the kind defaults so there is exactly one source for them. APP_URL = your ALB/DNS name.
+  - target:
+      kind: ConfigMap
+      name: student-app-config
+    patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: student-app-config
+      data:
+        APP_URL: https://student-app.example.com
+        DB_HOST: null
+        DB_PORT: null
+        DB_DATABASE: null
+        DB_USERNAME: null
+  # Database/Redis egress only inside the VPC (60-eks var.vpc_cidr default; adjust to yours).
+  - target:
+      kind: NetworkPolicy
+      name: student-app
+    patch: |-
+      - op: add
+        path: /spec/egress/1/to
+        value:
+          - ipBlock:
+              cidr: 10.60.0.0/16

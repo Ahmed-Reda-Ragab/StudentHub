@@ -1,0 +1,51 @@
+# Keep the build context small and the image free of secrets / dev artefacts.
+.git
+.github
+.gitignore
+.gitattributes
+.editorconfig
+.idea
+.vscode
+.claude
+.mcp.json
+boost.json
+AGENTS.md
+CLAUDE.md
+*.md
+
+# Secrets & local env — the container gets its config from env vars at runtime.
+.env
+.env.*
+!.env.example
+auth.json
+
+# Rebuilt inside the image
+node_modules
+vendor
+public/build
+public/hot
+public/storage
+
+# Local caches (bootstrap/cache may reference dev-only providers such as Boost)
+bootstrap/cache/*.php
+storage/logs/*
+storage/framework/cache/data/*
+storage/framework/sessions/*
+storage/framework/testing/*
+storage/framework/views/*
+!storage/**/.gitignore
+storage/*.key
+.phpunit.cache
+.phpunit.result.cache
+
+# Not needed at runtime
+tests
+phpunit.xml
+docs
+infra
+k8s
+deploy
+loadtest
+observability
+docker-compose*.yml
+students-subscriptions-laravel-spec*

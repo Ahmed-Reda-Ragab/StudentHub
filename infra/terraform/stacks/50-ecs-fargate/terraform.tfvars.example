@@ -1,0 +1,35 @@
+# cp terraform.tfvars.example terraform.tfvars   (terraform.tfvars is not committed)
+
+region   = "us-east-1"
+scenario = "50" # tag only: the scenario you are practising (50-58)
+
+# A git short SHA that CI already pushed to ECR (aws ecr list-images --repository-name student-app).
+image_tag = "3f2c1ab"
+
+# ---- sizing / cost (scenario 56)
+# task_cpu         = 512
+# task_memory      = 1024
+# use_fargate_spot = true     # 1 on-demand + the rest on Spot
+# autoscaling_max  = 6
+
+# ---- deployment strategy (scenarios 53-55). Switching families on an existing service:
+#      terraform apply -replace=module.ecs.aws_ecs_service.app
+# deployment_controller = "ECS"        # ECS | CODE_DEPLOY
+# deployment_strategy   = "ROLLING"    # ROLLING | BLUE_GREEN | LINEAR | CANARY
+# bake_time_in_minutes  = 5
+# canary_percent        = 10
+# linear_step_percent   = 25
+# codedeploy_deployment_config_name = "CodeDeployDefault.ECSCanary10Percent5Minutes"
+# use_deployment_alarms = true         # roll back on ALB 5xx ratio (scenarios 53–55)
+
+# ---- extra NON-secret env (rolled out by the next CI deploy). NOT for SRE_FAULT_* drills:
+#      deploy/ecs/render-taskdef.sh drops them — use deploy-ecs.yml extra_env instead.
+# app_environment = { DEPLOY_COLOR = "green" }
+
+# ---- network
+# enable_nat      = false   # true = private subnets + NAT (~32 USD/month)
+# certificate_arn = "arn:aws:acm:us-east-1:<ACCOUNT_ID>:certificate/<ID>"
+
+# ---- ops
+# alarm_email = "you@example.com"
+# enable_fis  = true        # scenario 75

@@ -1,0 +1,31 @@
+---
+# Recreate-strategy deploy of a CI-built image (scenarios 21, 22, 33). Everything the host runs
+# comes from the repo: docker-compose.prod.yml + deploy/ec2/*.sh; this role only orchestrates.
+app_dir: /opt/student-app
+app_owner: ec2-user
+app_image: ""
+app_env_name: "{{ env_name | default('lab') }}"
+app_aws_region: "{{ aws_region | default('us-east-1') }}"
+app_use_local_mysql: "{{ use_local_mysql | default(true) }}"
+app_repo_root: "{{ repo_root | default(playbook_dir ~ '/../../..') }}"
+
+# Files copied from the repo (deploy-build-on-server.sh is not here: it runs from a git clone, scenario 31).
+app_scripts:
+  - render-env-from-ssm.sh
+  - deploy-pull-image.sh
+  - backup-mysql-to-s3.sh
+app_extra_files:
+  - compose.awslogs.yml   # scenario 70 override (awslogs driver)
+
+# ssm | vault - see inventories/lab/group_vars/all/main.yml
+app_env_source: ssm
+app_env_vars: {}
+app_mysql_env_vars: {}
+
+# Redeploy even when CURRENT_RELEASE already equals app_image (e.g. after a manual change).
+app_force_deploy: false
+
+# Smoke check after the deploy (through port 80: the app container or the lb proxy).
+app_smoke_url: "http://127.0.0.1/ready"
+app_smoke_retries: 20
+app_smoke_delay: 3

@@ -1,0 +1,41 @@
+# Dependabot — keeps dependencies, pinned actions, base images and providers fresh (scenario 82).
+# Grouped weekly PRs keep the noise low; CI + lab-integration validate every bump.
+version: 2
+updates:
+  - package-ecosystem: composer
+    directory: "/"
+    schedule: { interval: weekly, day: sunday }
+    groups:
+      laravel-and-symfony:
+        patterns: ["laravel/*", "symfony/*"]
+      php-other:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule: { interval: weekly, day: sunday }
+    groups:
+      frontend:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly, day: sunday }
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: "/docker"
+    schedule: { interval: weekly, day: sunday }
+
+  - package-ecosystem: terraform
+    directories:
+      - "/infra/terraform/bootstrap"
+      - "/infra/terraform/modules/*"
+      - "/infra/terraform/stacks/*"
+    schedule: { interval: weekly, day: sunday }
+    groups:
+      terraform:
+        patterns: ["*"]

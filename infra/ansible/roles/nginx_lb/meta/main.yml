@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  author: Ahmed Reda
+  description: Syncs the single-host zero-downtime stack (deploy/ec2/lb) and runs blue/green or canary releases
+  company: StudentHub DevOps lab
+  license: MIT
+  min_ansible_version: "2.20"
+  platforms:
+    - name: Amazon Linux
+      versions:
+        - "2023"
+  galaxy_tags:
+    - deployment
+    - nginx
+    - bluegreen
+    - canary
+dependencies: []

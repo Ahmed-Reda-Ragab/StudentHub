@@ -1,0 +1,32 @@
+# AnalysisTemplate: the cheapest possible gate — call an HTTP endpoint and check the JSON.
+# Here: the preview/canary Service must answer GET /ready with {"status":"ready"} (DB reachable,
+# not drained) three times in a row. No metrics stack required, works on any cluster (scenario 67).
+#
+# It proves the new version can serve; it does NOT prove it serves correctly — a release with
+# SRE_FAULT_ERROR_RATE passes this check. Pair it with analysis-prometheus.yaml for real traffic.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: ready-check
+  namespace: student-app
+  labels:
+    app.kubernetes.io/part-of: student-app-lab
+spec:
+  args:
+    - name: service
+    - name: namespace
+      value: student-app
+  metrics:
+    - name: ready
+      count: 3
+      interval: 10s
+      failureLimit: 0
+      # A non-2xx answer (503 = unready) is a measurement *error* for the web provider:
+      # three consecutive errors fail the analysis.
+      consecutiveErrorLimit: 2
+      successCondition: result == "ready"
+      provider:
+        web:
+          url: "http://{{args.service}}.{{args.namespace}}.svc.cluster.local/ready"
+          jsonPath: "{$.status}"
+          timeoutSeconds: 5

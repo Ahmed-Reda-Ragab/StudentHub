@@ -1,0 +1,42 @@
+# Non-secret runtime configuration (12-factor: same image everywhere, config from env).
+# Secrets (APP_KEY, DB_PASSWORD, tokens) live in Secret "student-app-secrets" — see secret.example.yaml.
+# envFrom order in the Deployment is ConfigMap first, Secret second, so a key present in both
+# (e.g. DB_HOST written to SSM by the RDS module on EKS) is taken from the Secret.
+#
+# Plain-YAML caveat: pods read env only at start. Changing this ConfigMap does NOT restart pods —
+# run `kubectl -n student-app rollout restart deployment/student-app` (the Helm chart solves this
+# with a checksum annotation, kustomize with configMapGenerator name hashes).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: student-app-config
+  labels:
+    app.kubernetes.io/name: student-app
+data:
+  APP_NAME: "Students Subscriptions"
+  APP_ENV: production
+  APP_DEBUG: "false"
+  APP_URL: http://localhost:8088
+  APP_TIMEZONE: Africa/Cairo
+  APP_LOCALE: ar
+  # APP_VERSION is baked into the image (build arg) — never set it here.
+  DEPLOY_COLOR: none
+  DB_CONNECTION: mysql
+  DB_HOST: mysql
+  DB_PORT: "3306"
+  DB_DATABASE: student_app
+  DB_USERNAME: student
+  SESSION_DRIVER: database
+  CACHE_STORE: database
+  QUEUE_CONNECTION: sync
+  LOG_LEVEL: info
+  # SRE lab (config/sre_lab.php). Faults are the "bad release" knobs — keep them off here and
+  # flip them per release (scenario 68); the Helm chart puts them in the pod template instead.
+  SRE_LAB_ENABLED: "true"
+  METRICS_ENABLED: "true"
+  SRE_FAULT_ERROR_RATE: "0"
+  SRE_FAULT_LATENCY_MS: "0"
+  SRE_FAULT_UNHEALTHY: "false"
+  SRE_FAULT_BOOT_FAIL: "false"
+  LOADTEST_USERS: "20"
+  LOADTEST_STUDENTS_PER_USER: "100"

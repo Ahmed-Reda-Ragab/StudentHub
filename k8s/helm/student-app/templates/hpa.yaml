@@ -1,0 +1,34 @@
+{{- if .Values.autoscaling.enabled }}
+# CPU autoscaling (scenario 6A). Targets the Rollout when Argo Rollouts manages the pods — the HPA
+# then scales the Rollout and Argo keeps the canary/stable ratio.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "student-app.fullname" . }}
+  labels:
+    {{- include "student-app.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    {{- if .Values.rollout.enabled }}
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    {{- else }}
+    apiVersion: apps/v1
+    kind: Deployment
+    {{- end }}
+    name: {{ include "student-app.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    # Utilization is relative to the CPU *request* (resources.requests.cpu).
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+  {{- with .Values.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

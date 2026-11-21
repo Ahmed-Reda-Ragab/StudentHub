@@ -1,0 +1,18 @@
+# Partial S3 backend configuration shared by every stack (CONVENTIONS §6).
+#
+#   cp backend.hcl.example backend.hcl        # or: terraform -chdir=bootstrap output -raw backend_hcl > backend.hcl
+#   cd stacks/<NN-name> && terraform init -backend-config=../../backend.hcl
+#   cd bootstrap        && terraform init -migrate-state -backend-config=../backend.hcl
+#
+# Not secret (no credentials here), but account-specific: keep backend.hcl out of git.
+
+bucket       = "student-app-tfstate-123456789012" # bootstrap output: state_bucket
+region       = "us-east-1"
+use_lockfile = true # S3-native lock file (<key>.tflock), Terraform >= 1.10 — no DynamoDB table
+encrypt      = true
+
+# `key` is deliberately NOT set here: each root module pins its own key in its backend block
+#   bootstrap               -> bootstrap/terraform.tfstate
+#   stacks/<NN-name>        -> stacks/<NN-name>/terraform.tfstate
+# so one file serves every stack and two stacks can never write the same state.
+# CI passes it explicitly as well: -backend-config="key=stacks/<stack>/terraform.tfstate"

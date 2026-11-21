@@ -1,0 +1,7 @@
+---
+# Prometheus node_exporter (scenario 71). Pinned tag: an exporter upgrade changes metric names
+# that dashboards and alert rules depend on, so it is a reviewed change, not a surprise.
+# (same image is mirrored at quay.io/prometheus/node-exporter if Docker Hub rate limits bite)
+node_exporter_image: prom/node-exporter:v1.13.1
+node_exporter_container_name: node-exporter
+node_exporter_port: 9100

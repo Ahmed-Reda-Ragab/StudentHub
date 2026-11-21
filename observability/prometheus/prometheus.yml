@@ -1,0 +1,85 @@
+# Prometheus for the lab stack (observability/compose) — scenarios 12/71.
+#
+# Scrapes the app slots on the app's own Docker network (student-app_default):
+#   app:8080        docker-compose.yml / docker-compose.prod.yml (single container)
+#   app_blue:8080   deploy/ec2/lb (blue/green, canary, rolling slots)
+#   app_green:8080
+# Slots that do not exist right now simply show as DOWN in Status → Targets; the
+# SLO rules sum over whatever is up, and StudentAppNoTargetsUp only fires when ALL are down.
+# /metrics is scraped container-to-container, never through the public LB (nginx blocks it).
+#
+#   promtool check config observability/prometheus/prometheus.yml
+#   curl -X POST http://localhost:9090/-/reload      # after editing (needs --web.enable-lifecycle)
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+  external_labels:
+    project: student-app
+    env: lab
+
+rule_files:
+  - rules/recording.yml
+  - rules/slo-burn-rate.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: student-app
+    metrics_path: /metrics
+    scrape_interval: 10s
+    # With METRICS_TOKEN set on the app, uncomment and mount the token file:
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /etc/prometheus/secrets/metrics_token
+    static_configs:
+      - targets: ["app:8080"]
+        labels:
+          slot: single
+      - targets: ["app_blue:8080"]
+        labels:
+          slot: blue
+      - targets: ["app_green:8080"]
+        labels:
+          slot: green
+    # version/color are NOT target labels: they come from student_app_app_info{version,color}
+    # and are joined in queries (`* on(instance) group_left(version,color) student_app_app_info`),
+    # so a redeploy of the same slot does not need a Prometheus change.
+
+  - job_name: node-exporter
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  - job_name: cadvisor
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["cadvisor:8080"]
+    metric_relabel_configs:
+      # cAdvisor is very chatty; keep what the dashboards and capacity questions use.
+      - source_labels: [__name__]
+        regex: "container_(cpu_usage_seconds_total|cpu_cfs_throttled_periods_total|cpu_cfs_periods_total|memory_working_set_bytes|memory_rss|spec_memory_limit_bytes|network_receive_bytes_total|network_transmit_bytes_total|fs_usage_bytes|oom_events_total|last_seen|start_time_seconds)|machine_.*"
+        action: keep
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]
+
+  - job_name: grafana
+    static_configs:
+      - targets: ["grafana:3000"]
+
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+
+  - job_name: alloy
+    static_configs:
+      - targets: ["alloy:12345"]

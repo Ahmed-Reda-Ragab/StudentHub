@@ -1,0 +1,72 @@
+# Database migrations: ONCE per release, as a separate one-off task — never on every replica's boot
+# (AUTORUN_LARAVEL_MIGRATION=false in the image). CONVENTIONS §2.
+#
+# Plain-YAML limits (this is why the Helm chart uses a hook and Argo CD a sync wave):
+#   * a Job's pod template is immutable → delete the finished Job before applying a new image:
+#       kubectl -n student-app delete job student-app-migrate --ignore-not-found
+#   * `kubectl apply -k` creates it together with the Deployment, so new pods may start before the
+#     schema is migrated (readiness only checks DB connectivity). For a real release run it first:
+#       kubectl apply -k k8s/manifests/overlays/kind
+#       kubectl -n student-app wait --for=condition=complete job/student-app-migrate --timeout=300s
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: student-app-migrate
+  labels:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: migrate
+  annotations:
+    # Argo CD: run in the Sync phase *after* the ExternalSecret (wave -1) exists and *before* the app (wave 1).
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  # One retry for a transient DB hiccup; a real migration error must fail loudly, not loop.
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  # Garbage-collect the finished Job so the next `kubectl apply` can create it again.
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: student-app
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: student-app
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 82
+        runAsGroup: 82
+        fsGroup: 82
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: student-app
+          imagePullPolicy: IfNotPresent
+          # `args` (not `command`) keeps the image ENTRYPOINT, so /etc/entrypoint.d scripts still run.
+          # `--isolated` is not used: it needs the cache_locks table, absent on a fresh database (§2 note).
+          args: ["php", "artisan", "migrate", "--force"]
+          envFrom:
+            - configMapRef:
+                name: student-app-config
+            - secretRef:
+                name: student-app-secrets
+          env:
+            # One-off command: skip `php artisan optimize` at container start.
+            - name: AUTORUN_ENABLED
+              value: "false"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]

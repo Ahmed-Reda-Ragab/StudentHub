@@ -1,0 +1,344 @@
+# Terraform — scenario 92: infrastructure changes go through a pull request like code.
+#
+#   pull_request       fmt check + plan for every stack whose files OR used modules changed;
+#                      the plan (and an optional Infracost estimate) is posted as a PR comment
+#   workflow_dispatch  stack + action: plan | apply | destroy
+#                      plan always runs first (read-only role); apply/destroy then wait for the
+#                      GitHub environment `lab` (add a required reviewer there for an approval gate),
+#                      re-plan with the admin role and apply exactly that saved plan
+#
+# Auth: GitHub OIDC -> AWS, no stored keys (roles from infra/terraform/bootstrap).
+# Repository variables:
+#   AWS_REGION                   e.g. us-east-1
+#   TF_STATE_BUCKET              bootstrap output state_bucket
+#   AWS_TERRAFORM_ROLE_ARN       bootstrap output github_terraform_role_arn       (apply/destroy)
+#   AWS_TERRAFORM_PLAN_ROLE_ARN  bootstrap output github_terraform_plan_role_arn  (plans, read-only)
+# Optional secret INFRACOST_API_KEY adds a monthly cost estimate to the PR comment.
+# bootstrap is never run from here: it creates the very roles this workflow assumes.
+name: Terraform
+
+on:
+  pull_request:
+    paths:
+      - "infra/terraform/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: "Stack (infra/terraform/stacks/<stack>)"
+        type: choice
+        required: true
+        options:
+          - 20-ec2-single
+          - 35-codebuild
+          - 36-codepipeline
+          - 40-ec2-alb-asg
+          - 50-ecs-fargate
+          - 60-eks
+      action:
+        description: "plan | apply | destroy"
+        type: choice
+        required: true
+        default: plan
+        options:
+          - plan
+          - apply
+          - destroy
+
+permissions:
+  contents: read
+
+# One run per stack (dispatch) or per PR at a time. Never cancel: a killed apply leaves a lock + half-built infra.
+concurrency:
+  group: terraform-${{ github.event_name == 'workflow_dispatch' && inputs.stack || github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TF_VERSION: "~1.14" # pinned minor (bump deliberately); versions.tf requires >= 1.11 (S3 native locking GA)
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_STATE_REGION: ${{ vars.AWS_REGION }}
+  TF_VAR_region: ${{ vars.AWS_REGION }} # deploy stacks into the same region as the state/roles
+  # Root-module inputs without defaults (CONVENTIONS §9). Unused TF_VAR_* are ignored by other stacks.
+  TF_VAR_codeconnections_arn: ${{ vars.CODECONNECTIONS_ARN }} # stacks 35, 36 (bootstrap output)
+  TF_VAR_image_tag: ${{ vars.ECS_IMAGE_TAG }} # stack 50: first image only — deploy-ecs.yml owns it afterwards
+
+jobs:
+  fmt:
+    name: terraform fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive -diff infra/terraform
+
+  targets:
+    name: Select stacks
+    runs-on: ubuntu-latest
+    outputs:
+      stacks: ${{ steps.select.outputs.stacks }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Stacks touched by this change
+        id: select
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_STACK: ${{ inputs.stack }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ -z "$TF_STATE_BUCKET" ]]; then
+            echo "::warning::Repository variable TF_STATE_BUCKET is not set (apply infra/terraform/bootstrap first). Skipping plans."
+            echo "stacks=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            if [[ ! -d "infra/terraform/stacks/$INPUT_STACK" ]]; then
+              echo "::error::infra/terraform/stacks/$INPUT_STACK does not exist on this ref"
+              exit 1
+            fi
+            echo "stacks=[\"$INPUT_STACK\"]" >> "$GITHUB_OUTPUT"   # choice input: safe characters only
+            exit 0
+          fi
+
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- infra/terraform .github/workflows/terraform.yml > changed.txt
+          echo "changed files:"; cat changed.txt
+
+          # A module change re-plans every stack that calls it.
+          mapfile -t modules < <(sed -n 's|^infra/terraform/modules/\([^/]*\)/.*|\1|p' changed.txt | sort -u)
+          all=false
+          if grep -qx '.github/workflows/terraform.yml' changed.txt; then all=true; fi
+
+          stacks=()
+          for dir in infra/terraform/stacks/*/; do
+            stack="$(basename "$dir")"
+            if [[ "$all" == true ]] || grep -q "^infra/terraform/stacks/$stack/" changed.txt; then
+              stacks+=("$stack")
+              continue
+            fi
+            for m in "${modules[@]}"; do
+              if grep -qs "modules/$m\"" "$dir"*.tf; then
+                stacks+=("$stack")
+                break
+              fi
+            done
+          done
+
+          json="$(printf '%s\n' "${stacks[@]}" | jq -R . | jq -sc 'map(select(length > 0))')"
+          echo "stacks to plan: $json"
+          echo "stacks=$json" >> "$GITHUB_OUTPUT"
+
+  plan:
+    name: plan (${{ matrix.stack }})
+    needs: [fmt, targets]
+    # Fork PRs get no OIDC token (and must not get one): plans only run for branches of this repo.
+    if: >-
+      needs.targets.outputs.stacks != '[]' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # OIDC
+      pull-requests: write # plan comment
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ fromJSON(needs.targets.outputs.stacks) }}
+    env:
+      STACK: ${{ matrix.stack }}
+      DESTROY: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'destroy' }}
+      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+    defaults:
+      run:
+        working-directory: infra/terraform/stacks/${{ matrix.stack }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: AWS credentials (OIDC, read-only plan role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_TERRAFORM_PLAN_ROLE_ARN || vars.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: terraform init
+        run: |
+          terraform init -no-color \
+            -backend-config="bucket=$TF_STATE_BUCKET" \
+            -backend-config="region=$TF_STATE_REGION" \
+            -backend-config="key=stacks/$STACK/terraform.tfstate" \
+            -backend-config="use_lockfile=true" \
+            -backend-config="encrypt=true"
+
+      # -lock=false: the plan role is read-only (cannot write the .tflock object) and a plan
+      # must never block an apply. -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes.
+      - name: terraform plan
+        id: plan
+        run: |
+          args=(-no-color -lock=false -detailed-exitcode -out=tfplan)
+          if [[ "$DESTROY" == "true" ]]; then args+=(-destroy); fi
+          set +e
+          terraform plan "${args[@]}" > plan.log 2>&1
+          code=$?
+          set -e
+          cat plan.log
+          if [[ $code -eq 1 ]]; then
+            cp plan.log plan.txt
+          else
+            terraform show -no-color tfplan > plan.txt
+            terraform show -json tfplan > plan.json
+          fi
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Infracost setup
+        if: env.INFRACOST_API_KEY != '' && steps.plan.outputs.exitcode != '1'
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Infracost estimate
+        if: env.INFRACOST_API_KEY != '' && steps.plan.outputs.exitcode != '1'
+        continue-on-error: true # a cost estimate must never block a plan
+        run: infracost breakdown --path plan.json --format table --no-color > infracost.txt
+
+      - name: Summary + PR comment
+        if: always() && steps.plan.outputs.exitcode != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PLAN_EXIT: ${{ steps.plan.outputs.exitcode }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          case "$PLAN_EXIT" in
+            0) status="no changes" ;;
+            2) status="changes" ;;
+            *) status="FAILED" ;;
+          esac
+          [[ "$DESTROY" == "true" ]] && status="destroy plan, $status"
+          marker="<!-- terraform-plan:$STACK -->"
+          fence="$(printf '\140\140\140')" # three backticks via octal escapes (shellcheck SC2016-safe)
+          size=$(wc -c < plan.txt)
+          {
+            echo "$marker"
+            echo "### Terraform plan: \`$STACK\` ($status)"
+            echo
+            echo "Commit \`${GITHUB_SHA::7}\` · [workflow run]($RUN_URL)"
+            echo
+            echo "<details><summary>Plan output</summary>"
+            echo
+            echo "$fence"
+            head -c 60000 plan.txt
+            echo
+            if [[ $size -gt 60000 ]]; then echo "... truncated ($size bytes), full plan in the run log"; fi
+            echo "$fence"
+            echo
+            echo "</details>"
+            if [[ -s infracost.txt ]]; then
+              echo
+              echo "<details><summary>Infracost monthly estimate</summary>"
+              echo
+              echo "$fence"
+              head -c 4000 infracost.txt
+              echo "$fence"
+              echo
+              echo "</details>"
+            fi
+          } > comment.md
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$EVENT" != "pull_request" ]]; then exit 0; fi
+          # One comment per stack, updated in place on every push (found by its hidden marker).
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
+                 --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | sed -n '1p')
+          if [[ -n "$id" ]]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@comment.md > /dev/null
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@comment.md > /dev/null
+          fi
+
+      - name: Fail on plan error
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "::error::terraform plan failed for $STACK"
+          exit 1
+
+  apply:
+    name: ${{ inputs.action }} (${{ inputs.stack }})
+    needs: plan
+    if: github.event_name == 'workflow_dispatch' && inputs.action != 'plan'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # The approval gate: configure required reviewers on the `lab` environment. The OIDC subject
+    # becomes repo:<owner>/<repo>:environment:lab, the only non-branch subject the admin role trusts.
+    environment: lab
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      STACK: ${{ inputs.stack }}
+      ACTION: ${{ inputs.action }}
+    defaults:
+      run:
+        working-directory: infra/terraform/stacks/${{ inputs.stack }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: AWS credentials (OIDC, terraform role)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-duration-seconds: 7200 # EKS create/destroy can take longer than the 1h default
+
+      - name: terraform init
+        run: |
+          terraform init -no-color \
+            -backend-config="bucket=$TF_STATE_BUCKET" \
+            -backend-config="region=$TF_STATE_REGION" \
+            -backend-config="key=stacks/$STACK/terraform.tfstate" \
+            -backend-config="use_lockfile=true" \
+            -backend-config="encrypt=true"
+
+      # Re-plan under the lock and apply exactly that saved plan (no -auto-approve on a live diff).
+      # It matches the reviewed plan unless the stack changed in between (then review this log).
+      - name: terraform plan (saved)
+        run: |
+          args=(-no-color -out=tfplan)
+          if [[ "$ACTION" == "destroy" ]]; then args+=(-destroy); fi
+          terraform plan "${args[@]}"
+
+      - name: terraform apply
+        run: terraform apply -no-color tfplan
+
+      - name: Outputs
+        if: env.ACTION == 'apply'
+        run: |
+          fence="$(printf '\140\140\140')"
+          {
+            echo "### \`$STACK\` applied"
+            echo "$fence"
+            terraform output -no-color
+            echo "$fence"
+          } >> "$GITHUB_STEP_SUMMARY"

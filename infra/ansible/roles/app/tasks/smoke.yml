@@ -1,0 +1,17 @@
+---
+# Same check the ALB target group uses (/ready = app + DB ping). Runs on the host itself, so it
+# validates the release before anything outside (CI smoke test, ALB) looks at it.
+- name: Wait until /ready reports ready
+  ansible.builtin.uri:
+    url: "{{ app_smoke_url }}"
+    return_content: true
+    status_code: 200
+    timeout: 5
+  register: app_ready
+  until: app_ready.json is defined and app_ready.json.status | default('') == 'ready'
+  retries: "{{ app_smoke_retries }}"
+  delay: "{{ app_smoke_delay }}"
+
+- name: Report the live release
+  ansible.builtin.debug:
+    msg: "live: version={{ app_ready.json.version | default('?') }} color={{ app_ready.json.color | default('?') }}"

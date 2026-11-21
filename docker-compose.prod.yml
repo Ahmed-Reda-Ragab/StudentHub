@@ -1,0 +1,71 @@
+# EC2 single host — "Recreate" strategy (scenarios 20, 21, 22, 31, 32, 33).
+#
+# Two ways to get the image:
+#   build on the server : docker compose -f docker-compose.prod.yml build app        (scenario 20 / 31)
+#   pull from ECR       : APP_IMAGE=<acct>.dkr.ecr.<region>.amazonaws.com/student-app:<sha> \
+#                         docker compose -f docker-compose.prod.yml pull app         (scenario 32 / 33)
+#
+# Secrets/config come from an env file written by the deploy script from SSM Parameter Store
+# (default /opt/student-app/app.env) — never committed. Example: deploy/env/app.env.example
+#
+# Deploy = pull/build → migrate (one-off) → `up -d` (recreates the container ⇒ a few seconds of
+# downtime; measure it with deploy/scripts/probe.sh). Zero-downtime variants live in deploy/ec2/lb/.
+name: student-app
+
+services:
+    app:
+        build:
+            context: .
+            dockerfile: docker/Dockerfile
+            args:
+                APP_VERSION: ${APP_VERSION:-manual}
+        image: ${APP_IMAGE:-student-app:local}
+        env_file:
+            - path: ${APP_ENV_FILE:-/opt/student-app/app.env}
+              required: true
+        ports:
+            - "80:8080"
+        depends_on:
+            mysql:
+                condition: service_healthy
+                required: false
+        healthcheck:
+            test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/up || exit 1"]
+            interval: 10s
+            timeout: 3s
+            retries: 6
+            start_period: 30s
+        stop_grace_period: 30s
+        restart: unless-stopped
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "5"
+
+    # Local MySQL container (scenarios 20–27). From scenario 41 on, DB_HOST points at RDS and
+    # this service is skipped with:  docker compose -f docker-compose.prod.yml up -d --no-deps app
+    mysql:
+        image: mysql:8.4
+        command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+        env_file:
+            # optional: absent on hosts that use RDS (compose loads env files of every service)
+            - path: ${MYSQL_ENV_FILE:-/opt/student-app/mysql.env}
+              required: false
+        volumes:
+            - mysql-data:/var/lib/mysql
+        healthcheck:
+            test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+            interval: 10s
+            timeout: 3s
+            retries: 30
+            start_period: 30s
+        restart: unless-stopped
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+
+volumes:
+    mysql-data:

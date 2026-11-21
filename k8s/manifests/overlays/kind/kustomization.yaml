@@ -1,0 +1,40 @@
+# kind overlay: NodePort 30080 (published as localhost:8088 by k8s/kind/cluster.yaml) and the
+# side-loaded CI image. Patches are inline on purpose: every *.yaml under k8s/ (outside helm/) is
+# validated by kubeconform as a full object, and a partial patch file would fail that check.
+#   kubectl apply -k k8s/manifests/overlays/kind
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: student-app
+    newTag: ci-v1
+patches:
+  # Expose the Service on every node's port 30080. Service ports merge on (port, protocol):
+  # without `protocol: TCP` the patch entry silently doesn't match and nodePort is dropped.
+  - target:
+      kind: Service
+      name: student-app
+    patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: student-app
+      spec:
+        type: NodePort
+        ports:
+          - name: http
+            port: 80
+            protocol: TCP
+            nodePort: 30080
+  # Database egress only to the lab MySQL pod (k8s/kind/mysql.yaml), not to any IP on 3306.
+  - target:
+      kind: NetworkPolicy
+      name: student-app
+    patch: |-
+      - op: add
+        path: /spec/egress/1/to
+        value:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: mysql

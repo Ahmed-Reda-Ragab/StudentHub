@@ -1,0 +1,52 @@
+{{- if .Values.networkPolicy.enabled }}
+# Least-privilege networking for app AND migration pods (selector without the component label).
+# Everything not listed is denied: no internet, no other namespaces, no EC2 metadata endpoint.
+# Enforced by kindnet (kind ≥ v0.24) and by the Amazon VPC CNI with network policy enabled.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "student-app.fullname" . }}
+  labels:
+    {{- include "student-app.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "student-app.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - ports:
+        - port: 8080
+          protocol: TCP
+      {{- with .Values.networkPolicy.ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    # DNS → CoreDNS only.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Database / cache.
+    - ports:
+        {{- range .Values.networkPolicy.databasePorts }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      {{- with .Values.networkPolicy.databaseTo }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- with .Values.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

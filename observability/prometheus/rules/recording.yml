@@ -1,0 +1,307 @@
+# SLI recording rules - scenarios 71/73 (docs/devops/CONVENTIONS.md section 5).
+#
+# Availability SLI = non-5xx / all requests on APP routes. Excluded on purpose:
+#   sre-lab.*                   load/chaos endpoints: they fail on request and must not burn the real budget
+#   up, health.ready, metrics   probes and the scraper: cheap, always 200, they would dilute real errors
+# Latency SLI = requests faster than 300ms (bucket le="0.3") / all requests on the same routes.
+# Drill SLI   = only route="sre-lab.error": what loadtest/k6/error-budget-burn.js burns.
+#
+# Every ratio is recorded for each alert window (5m ... 3d), per job (app, app_blue and
+# app_green all scrape as job="student-app") and overall. It is a ratio of summed rates,
+# never an average of per-instance ratios (that would weigh an idle instance like a busy
+# one). No traffic gives 0/0 = NaN, and NaN never fires an alert.
+#
+# Generated together with observability/k8s/prometheusrule-slo.yaml - change both.
+groups:
+  - name: student-app-sli-availability
+    rules:
+      - record: job:student_app_sli_availability_errors:ratio_rate5m
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[5m]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[5m]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[5m]))
+      - record: job:student_app_sli_availability_errors:ratio_rate30m
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[30m]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[30m]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[30m]))
+      - record: job:student_app_sli_availability_errors:ratio_rate1h
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[1h]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[1h]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[1h]))
+      - record: job:student_app_sli_availability_errors:ratio_rate2h
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[2h]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[2h]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[2h]))
+      - record: job:student_app_sli_availability_errors:ratio_rate6h
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[6h]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[6h]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[6h]))
+      - record: job:student_app_sli_availability_errors:ratio_rate1d
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[1d]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[1d]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[1d]))
+      - record: job:student_app_sli_availability_errors:ratio_rate3d
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[3d]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[3d]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[3d]))
+      - record: student_app:sli_availability_errors:ratio_rate5m
+        expr: |-
+          (
+            sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[5m]))
+            or
+            0 * sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[5m]))
+          )
+          /
+          sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[5m]))
+      - record: student_app:sli_availability_errors:ratio_rate30m
+        expr: |-
+          (
+            sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[30m]))
+            or
+            0 * sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[30m]))
+          )
+          /
+          sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[30m]))
+      - record: student_app:sli_availability_errors:ratio_rate1h
+        expr: |-
+          (
+            sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[1h]))
+            or
+            0 * sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[1h]))
+          )
+          /
+          sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[1h]))
+      - record: student_app:sli_availability_errors:ratio_rate2h
+        expr: |-
+          (
+            sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[2h]))
+            or
+            0 * sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[2h]))
+          )
+          /
+          sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[2h]))
+      - record: student_app:sli_availability_errors:ratio_rate6h
+        expr: |-
+          (
+            sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[6h]))
+            or
+            0 * sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[6h]))
+          )
+          /
+          sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[6h]))
+      - record: student_app:sli_availability_errors:ratio_rate1d
+        expr: |-
+          (
+            sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[1d]))
+            or
+            0 * sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[1d]))
+          )
+          /
+          sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[1d]))
+      - record: student_app:sli_availability_errors:ratio_rate3d
+        expr: |-
+          (
+            sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[3d]))
+            or
+            0 * sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[3d]))
+          )
+          /
+          sum(rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[3d]))
+  - name: student-app-sli-latency
+    rules:
+      - record: job:student_app_sli_latency_good:ratio_rate5m
+        expr: |-
+          sum by (job) (rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[5m]))
+          /
+          sum by (job) (rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[5m]))
+      - record: job:student_app_sli_latency_good:ratio_rate30m
+        expr: |-
+          sum by (job) (rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[30m]))
+          /
+          sum by (job) (rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[30m]))
+      - record: job:student_app_sli_latency_good:ratio_rate1h
+        expr: |-
+          sum by (job) (rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[1h]))
+          /
+          sum by (job) (rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[1h]))
+      - record: job:student_app_sli_latency_good:ratio_rate2h
+        expr: |-
+          sum by (job) (rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[2h]))
+          /
+          sum by (job) (rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[2h]))
+      - record: job:student_app_sli_latency_good:ratio_rate6h
+        expr: |-
+          sum by (job) (rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[6h]))
+          /
+          sum by (job) (rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[6h]))
+      - record: job:student_app_sli_latency_good:ratio_rate1d
+        expr: |-
+          sum by (job) (rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[1d]))
+          /
+          sum by (job) (rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[1d]))
+      - record: job:student_app_sli_latency_good:ratio_rate3d
+        expr: |-
+          sum by (job) (rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[3d]))
+          /
+          sum by (job) (rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[3d]))
+      - record: student_app:sli_latency_good:ratio_rate5m
+        expr: |-
+          sum(rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[5m]))
+          /
+          sum(rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[5m]))
+      - record: student_app:sli_latency_good:ratio_rate30m
+        expr: |-
+          sum(rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[30m]))
+          /
+          sum(rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[30m]))
+      - record: student_app:sli_latency_good:ratio_rate1h
+        expr: |-
+          sum(rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[1h]))
+          /
+          sum(rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[1h]))
+      - record: student_app:sli_latency_good:ratio_rate2h
+        expr: |-
+          sum(rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[2h]))
+          /
+          sum(rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[2h]))
+      - record: student_app:sli_latency_good:ratio_rate6h
+        expr: |-
+          sum(rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[6h]))
+          /
+          sum(rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[6h]))
+      - record: student_app:sli_latency_good:ratio_rate1d
+        expr: |-
+          sum(rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[1d]))
+          /
+          sum(rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[1d]))
+      - record: student_app:sli_latency_good:ratio_rate3d
+        expr: |-
+          sum(rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[3d]))
+          /
+          sum(rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[3d]))
+  - name: student-app-sli-drill
+    rules:
+      - record: job:student_app_sli_drill_errors:ratio_rate5m
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error", status=~"5.."}[5m]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[5m]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[5m]))
+      - record: job:student_app_sli_drill_errors:ratio_rate30m
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error", status=~"5.."}[30m]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[30m]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[30m]))
+      - record: job:student_app_sli_drill_errors:ratio_rate1h
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error", status=~"5.."}[1h]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[1h]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[1h]))
+      - record: job:student_app_sli_drill_errors:ratio_rate2h
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error", status=~"5.."}[2h]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[2h]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[2h]))
+      - record: job:student_app_sli_drill_errors:ratio_rate6h
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error", status=~"5.."}[6h]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[6h]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[6h]))
+      - record: job:student_app_sli_drill_errors:ratio_rate1d
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error", status=~"5.."}[1d]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[1d]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[1d]))
+      - record: job:student_app_sli_drill_errors:ratio_rate3d
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error", status=~"5.."}[3d]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[3d]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route="sre-lab.error"}[3d]))
+  - name: student-app-slo-30d
+    interval: 5m  # 30-day windows are expensive and move slowly
+    rules:
+      - record: job:student_app_sli_availability_errors:ratio_rate30d
+        expr: |-
+          (
+            sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics", status=~"5.."}[30d]))
+            or
+            0 * sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[30d]))
+          )
+          /
+          sum by (job) (rate(student_app_http_requests_total{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[30d]))
+      - record: job:student_app_sli_latency_good:ratio_rate30d
+        expr: |-
+          sum by (job) (rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics", le="0.3"}[30d]))
+          /
+          sum by (job) (rate(student_app_http_request_duration_seconds_count{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[30d]))
+      - record: student_app:slo_objective:ratio
+        expr: |-
+          vector(0.995)
+        labels:
+          slo: "availability"
+      - record: student_app:slo_objective:ratio
+        expr: |-
+          vector(0.95)
+        labels:
+          slo: "latency"

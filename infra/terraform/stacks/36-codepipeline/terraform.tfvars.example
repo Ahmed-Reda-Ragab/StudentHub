@@ -1,0 +1,17 @@
+# cp terraform.tfvars.example terraform.tfvars   (terraform.tfvars is not committed)
+#
+# Values from stack 50 come from a generated file instead of copy/paste:
+#   terraform -chdir=../50-ecs-fargate output -json pipeline_inputs > stack50.auto.tfvars.json
+
+region   = "us-east-1"
+scenario = "36"
+
+# terraform -chdir=../../bootstrap output -raw codeconnections_arn
+codeconnections_arn = "arn:aws:codeconnections:us-east-1:<ACCOUNT_ID>:connection/<ID>"
+
+branch      = "master"
+deploy_mode = "ecs" # ecs | codedeploy-ecs (stack 50 with deployment_controller = "CODE_DEPLOY") | codebuild
+
+# run_migrations   = true    # CodeBuild migration step before the deploy action
+# require_approval = true    # manual promotion gate (scenario 36)
+# taskdef_source   = "repo"  # codedeploy-ecs: repo template vs live revision

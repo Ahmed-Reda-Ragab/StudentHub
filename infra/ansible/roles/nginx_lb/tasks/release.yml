@@ -1,0 +1,137 @@
+---
+# Release nginx_lb_image with bin/bluegreen.sh or bin/canary.sh (scenarios 23 / 24).
+# Expects tasks/main.yml (sync) and the app role's files+env tasks (app.env) to have run.
+- name: Validate the release request
+  ansible.builtin.assert:
+    that:
+      - nginx_lb_strategy in ['bluegreen', 'canary']
+      - nginx_lb_image | length > 0
+      - nginx_lb_image is not search(':latest$')
+    fail_msg: "Set nginx_lb_strategy (bluegreen|canary) and an immutable app_image (no :latest)."
+    quiet: true
+
+# The lb scripts pull with plain `docker compose pull`; the instance profile allows ECR pulls.
+- name: Log in to ECR with the instance role
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null
+    executable: /bin/bash
+  environment:
+    AWS_REGION: "{{ nginx_lb_environment.AWS_REGION }}"
+    REGISTRY: "{{ nginx_lb_image.split('/')[0] }}"
+  changed_when: false
+  when: "'.dkr.ecr.' in nginx_lb_image"
+
+- name: Read the stack state
+  ansible.builtin.slurp:
+    src: "{{ nginx_lb_dir }}/state/release.env"
+  register: nginx_lb_state_file
+  failed_when: false
+
+- name: Parse the stack state
+  ansible.builtin.set_fact:
+    nginx_lb_state_text: "{{ nginx_lb_state_file.content | default('') | b64decode }}"
+
+# state/release.env is KEY=VALUE lines written by lib.sh save_state (ACTIVE, MODE, BLUE_IMAGE, GREEN_IMAGE).
+# Backslashes are doubled because Jinja unescapes string literals ('\1' would become chr(1)).
+- name: Work out what is live
+  ansible.builtin.set_fact:
+    nginx_lb_active: >-
+      {{ (nginx_lb_state_text | regex_search('^ACTIVE=([a-z]+)', '\\1', multiline=true) or ['blue']) | first }}
+    nginx_lb_mode: >-
+      {{ (nginx_lb_state_text | regex_search('^MODE=([a-z]+)', '\\1', multiline=true) or ['single']) | first }}
+
+- name: Read the image of the live color
+  ansible.builtin.set_fact:
+    nginx_lb_live_image: >-
+      {{ (nginx_lb_state_text | regex_search('^' ~ nginx_lb_active | upper ~ '_IMAGE=([^\\s]*)', '\\1', multiline=true) or ['']) | first }}
+
+# ---------------------------------------------------------------- first run: init
+# Moving from the Recreate stack (docker-compose.prod.yml, app on :80) to the lb stack: the old
+# app container must free port 80 for the proxy. Same compose project and volume => same database.
+- name: First run - stop the Recreate stack app container
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      ids=$(docker ps -aq --filter label=com.docker.compose.project=student-app --filter label=com.docker.compose.service=app)
+      if [ -n "$ids" ]; then docker rm -f $ids >/dev/null; echo removed; fi
+    executable: /bin/bash
+  register: nginx_lb_recreate_stop
+  changed_when: "'removed' in nginx_lb_recreate_stop.stdout"
+  when: nginx_lb_state_text | length == 0
+
+- name: First run - init.sh {{ nginx_lb_image }}
+  ansible.builtin.command:
+    argv:
+      - "{{ nginx_lb_dir }}/bin/init.sh"
+      - "{{ nginx_lb_image }}"
+  environment: "{{ nginx_lb_environment }}"
+  register: nginx_lb_init
+  changed_when: true
+  when: nginx_lb_state_text | length == 0
+
+# ---------------------------------------------------------------- release
+# Idempotent: nothing happens when the live color already serves this image.
+- name: Release {{ nginx_lb_image }}
+  ansible.builtin.command:
+    argv:
+      - "{{ nginx_lb_dir }}/bin/{{ nginx_lb_strategy }}.sh"
+      - "{{ nginx_lb_image }}"
+  environment: "{{ nginx_lb_environment | combine(nginx_lb_strategy_env) }}"
+  vars:
+    nginx_lb_strategy_env: >-
+      {{
+        {'SLOT_ENV': nginx_lb_slot_env, 'KEEP_OLD': nginx_lb_keep_old | bool | string | lower,
+         'DRAIN_SECONDS': nginx_lb_drain_seconds | string}
+        if nginx_lb_strategy == 'bluegreen' else
+        {'SLOT_ENV': nginx_lb_slot_env, 'STEPS': nginx_lb_canary_steps,
+         'STEP_SECONDS': nginx_lb_canary_step_seconds | string,
+         'MAX_ERROR_RATE': nginx_lb_canary_max_error_rate | string,
+         'MIN_REQUESTS': nginx_lb_canary_min_requests | string}
+      }}
+  # Long canaries outlive an idle SSM session: run as an async job and poll it.
+  async: "{{ nginx_lb_release_timeout }}"
+  poll: 15
+  register: nginx_lb_release
+  changed_when: true
+  # canary.sh exits 2 = metric gate tripped, traffic already back on the stable color.
+  failed_when: nginx_lb_release.rc | default(1) not in ([0, 2] if nginx_lb_strategy == 'canary' else [0])
+  when:
+    - nginx_lb_state_text | length > 0
+    - nginx_lb_live_image != nginx_lb_image or nginx_lb_mode != 'single'
+
+- name: Show the release log
+  ansible.builtin.debug:
+    var: nginx_lb_release.stdout_lines
+  when: nginx_lb_release is not skipped
+
+- name: Report an aborted canary
+  ansible.builtin.fail:
+    msg: >-
+      Canary ABORTED by the error-rate gate (exit 2): 100% of traffic is back on the stable color.
+      Set nginx_lb_canary_expect_abort=true when this is a bad-release drill.
+  when:
+    - nginx_lb_release is not skipped
+    - nginx_lb_release.rc | default(0) == 2
+    - not nginx_lb_canary_expect_abort | bool
+
+- name: Fail a drill whose bad release was promoted
+  ansible.builtin.fail:
+    msg: "Drill expected the canary to abort, but it was promoted - the gate did not catch the bad release."
+  when:
+    - nginx_lb_canary_expect_abort | bool
+    - nginx_lb_release is skipped or nginx_lb_release.rc | default(0) != 2
+
+- name: Check the proxy answers
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ nginx_lb_environment.LB_HTTP_PORT }}/ready"
+    return_content: true
+  register: nginx_lb_ready
+  until: nginx_lb_ready.json is defined and nginx_lb_ready.json.status | default('') == 'ready'
+  retries: 10
+  delay: 3
+
+- name: Report the live color
+  ansible.builtin.debug:
+    msg: "live: color={{ nginx_lb_ready.json.color | default('?') }} version={{ nginx_lb_ready.json.version | default('?') }}"

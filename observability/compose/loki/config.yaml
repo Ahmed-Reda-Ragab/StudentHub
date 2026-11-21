@@ -1,0 +1,45 @@
+# Loki 3.x, single binary, local filesystem — sized for one lab host.
+# Logs arrive from Alloy (../alloy/config.alloy). Query them in Grafana → Explore → Loki:
+#   {service=~"app.*"} | json | level_name="ERROR"
+#   sum by (service) (rate({compose_project="student-app"} [5m]))
+
+auth_enabled: false # single tenant ("fake"); put Loki behind auth before exposing it
+
+server:
+  http_listen_port: 3100
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: "2024-04-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  retention_period: 168h # 7 days of logs is plenty for drills; metrics keep the long view
+  allow_structured_metadata: true
+  volume_enabled: true
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true # the compactor is what actually deletes expired chunks
+  delete_request_store: filesystem
+
+analytics:
+  reporting_enabled: false

@@ -1,0 +1,4 @@
+# {{ ansible_managed }} (role common)
+{% for key, value in common_sysctl.items() %}
+{{ key }} = {{ value }}
+{% endfor %}

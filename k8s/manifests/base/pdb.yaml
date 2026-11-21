@@ -1,0 +1,17 @@
+# Voluntary disruptions (node drain, cluster upgrade, Karpenter consolidation) may evict at most one
+# app pod at a time, so a node upgrade can never take the service down (scenario 66).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: student-app
+  labels:
+    app.kubernetes.io/name: student-app
+spec:
+  # maxUnavailable (not minAvailable) keeps working when the HPA scales to 6 replicas.
+  maxUnavailable: 1
+  # A crash-looping pod is already "down": let drains evict it instead of blocking forever.
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: student-app
+      app.kubernetes.io/component: web

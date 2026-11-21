@@ -1,0 +1,17 @@
+---
+# Configure an app host from a bare AL2023 instance (scenario 21) or bake the golden AMI
+# (scenario 43, run by Packer). Safe to re-run: every role converges, nothing is redeployed.
+#
+#   ansible-playbook playbooks/provision.yml                       # all role_app hosts
+#   ansible-playbook playbooks/provision.yml -e target_hosts=standalone
+- name: Provision app hosts
+  hosts: "{{ target_hosts | default('role_app') }}"
+  become: true
+  gather_facts: true
+  roles:
+    - role: common
+    - role: docker
+    - role: cloudwatch_agent
+      when: provision_cloudwatch_agent | default(true) | bool
+    - role: node_exporter
+      when: provision_node_exporter | default(true) | bool

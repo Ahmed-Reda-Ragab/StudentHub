@@ -1,0 +1,75 @@
+// Grafana Alloy: Docker container logs → Loki (scenario 12/71).
+// Promtail is deprecated (LTS/EOL); Alloy is its successor and also speaks
+// Prometheus/OTLP if you want to grow this pipeline later.
+// UI with the live component graph: http://localhost:12345
+
+// 1) Find every running container through the Docker API.
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// 2) Turn Docker metadata into a few low-cardinality Loki labels.
+//    (Never label by request id / user / URL: Loki indexes labels, not content.)
+discovery.relabel "containers" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "compose_project"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+}
+
+// 3) Tail the logs.
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.containers.rules
+  labels        = { "source" = "docker" }
+  forward_to    = [loki.process.laravel.receiver]
+}
+
+// 4) The app logs JSON on stderr (LOG_STDERR_FORMATTER=Monolog\Formatter\JsonFormatter):
+//    {"message":"…","context":{…},"level":400,"level_name":"ERROR","channel":"production","datetime":"…","extra":{}}
+//    Promote level_name to a label (5 values: cheap) so "errors per service" is an index lookup.
+//    nginx access lines in the same container are not JSON: stage.json skips them untouched.
+loki.process "laravel" {
+  forward_to = [loki.write.local.receiver]
+
+  stage.match {
+    selector = "{service=~\"app|app_blue|app_green\"}"
+
+    stage.json {
+      expressions = { level = "level_name", channel = "channel" }
+    }
+
+    stage.labels {
+      values = { level = "" }
+    }
+
+    stage.structured_metadata {
+      values = { channel = "" }
+    }
+  }
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

@@ -1,0 +1,34 @@
+---
+- name: Create the app directory
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: "{{ app_owner }}"
+    group: "{{ app_owner }}"
+    mode: "0755"
+
+- name: Copy docker-compose.prod.yml
+  ansible.builtin.copy:
+    src: "{{ app_repo_root }}/docker-compose.prod.yml"
+    dest: "{{ app_dir }}/docker-compose.prod.yml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Copy the deploy scripts
+  ansible.builtin.copy:
+    src: "{{ app_repo_root }}/deploy/ec2/{{ item }}"
+    dest: "{{ app_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ app_scripts }}"
+
+- name: Copy compose overrides
+  ansible.builtin.copy:
+    src: "{{ app_repo_root }}/deploy/ec2/{{ item }}"
+    dest: "{{ app_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ app_extra_files }}"

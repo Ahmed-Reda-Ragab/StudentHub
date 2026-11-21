@@ -1,0 +1,23 @@
+# Static inventory - the same groups the aws_ec2 plugin builds, for when you want no AWS API
+# calls (or for CI: ansible-playbook --syntax-check -i inventories/lab/hosts.ini.example ...).
+#   cp inventories/lab/hosts.ini.example inventories/lab/hosts.ini   # git-ignored
+#   ansible-playbook -i inventories/lab/hosts.ini playbooks/deploy.yml -e app_image=...
+#
+# SSH: ansible_host = public DNS/IP. SSM: ansible_aws_ssm_instance_id = instance id.
+
+[role_app]
+i-0123456789abcdef0 ansible_host=ec2-203-0-113-10.compute-1.amazonaws.com ansible_aws_ssm_instance_id=i-0123456789abcdef0
+i-0aaaaaaaaaaaaaaa1 ansible_host=10.20.0.11 ansible_aws_ssm_instance_id=i-0aaaaaaaaaaaaaaa1 tags='{"Color": "blue"}'
+i-0bbbbbbbbbbbbbbb2 ansible_host=10.20.1.12 ansible_aws_ssm_instance_id=i-0bbbbbbbbbbbbbbb2 tags='{"Color": "blue"}'
+
+# stack 20 single host
+[standalone]
+i-0123456789abcdef0
+
+# stack 40 ASG members
+[in_asg]
+i-0aaaaaaaaaaaaaaa1
+i-0bbbbbbbbbbbbbbb2
+
+[env_lab:children]
+role_app

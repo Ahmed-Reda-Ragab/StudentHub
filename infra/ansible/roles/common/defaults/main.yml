@@ -1,0 +1,35 @@
+---
+# Baseline packages. AL2023 ships curl-minimal (provides /usr/bin/curl); installing the full
+# "curl" package would conflict with it, so we only make sure the minimal one is there.
+common_packages:
+  - git
+  - jq
+  - curl-minimal
+  - unzip
+  - tar
+
+# Production fleets usually stay on UTC. The lab uses the owner's local time so systemd timers
+# (03:00 backups) and journal timestamps read naturally; app logs are JSON with UTC anyway.
+common_timezone: Africa/Cairo
+
+# composer/npm builds on the box (scenario 20/31) OOM a 1-2 GiB instance without swap.
+common_swap_enabled: true
+common_swap_file: /swapfile
+common_swap_size_mb: 2048
+common_swappiness: 10   # swap is a safety net, not working memory
+
+# Kernel tuning dropped into /etc/sysctl.d (persisted across reboots).
+common_sysctl:
+  net.core.somaxconn: 4096             # listen backlog for nginx / php-fpm bursts (default 4096 on newer kernels, 128 on old)
+  net.ipv4.tcp_max_syn_backlog: 4096
+  vm.swappiness: "{{ common_swappiness }}"
+
+# journald keeps everything until the disk fills up; cap it (small 8-20 GiB root volumes).
+common_journald_system_max_use: 200M
+common_journald_max_file_size: 50M
+common_journald_max_retention: 14day
+
+# dnf-automatic: apply SECURITY updates only. On AL2023 this stays inside the locked release
+# (deterministic upgrades); moving to a newer AL2023 release is a deliberate AMI/instance refresh.
+common_auto_updates: true
+common_auto_updates_type: security   # security | default

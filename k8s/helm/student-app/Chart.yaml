@@ -1,0 +1,20 @@
+apiVersion: v2
+name: student-app
+description: >-
+  Students Subscriptions (Laravel) — production chart for the DevOps/SRE lab: Deployment or
+  Argo Rollouts (canary / blue-green with Prometheus analysis), migrations as a hook, ALB Ingress,
+  External Secrets (SSM), ServiceMonitor, NetworkPolicy.
+type: application
+# Chart version (packaging). Bump when templates change.
+version: 0.1.0
+# Fallback image tag only — every real deploy passes --set-string image.tag=<git short SHA>.
+appVersion: "dev"
+# preStop uses the native `sleep` lifecycle action (on by default since v1.30).
+kubeVersion: ">=1.30.0-0"
+home: https://github.com/Ahmed-Reda-Ragab/StudentHub
+sources:
+  - https://github.com/Ahmed-Reda-Ragab/StudentHub
+keywords:
+  - laravel
+  - argo-rollouts
+  - sre-lab

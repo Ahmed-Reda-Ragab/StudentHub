@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  author: Ahmed Reda
+  description: Baseline for Amazon Linux 2023 app hosts - packages, timezone, swap, sysctl, journald cap, security updates
+  company: StudentHub DevOps lab
+  license: MIT
+  min_ansible_version: "2.20"
+  platforms:
+    - name: Amazon Linux
+      versions:
+        - "2023"
+  galaxy_tags:
+    - baseline
+    - amazonlinux
+    - security
+dependencies: []

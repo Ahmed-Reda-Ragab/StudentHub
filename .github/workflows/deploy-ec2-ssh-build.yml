@@ -1,0 +1,144 @@
+# CD -> EC2 over SSH, building the image ON the server (scenario 31) - "the old way".
+#
+# Kept on purpose as the baseline to compare against deploy-ec2-ssm.yml (32). Why this is an
+# anti-pattern (interview material):
+#   - port 22 must be reachable from GitHub runners (thousands of changing IP ranges => 0.0.0.0/0)
+#   - a long-lived private key sits in GitHub secrets; leaked once = shell on prod until rotated
+#   - the production box compiles composer/npm/Docker layers: CPU/RAM spikes next to live traffic
+#   - every server builds its own, slightly different image; nothing is scanned before it runs
+#   - Recreate strategy: a few seconds of downtime per deploy (the probe below measures it)
+#
+# Plain `ssh` instead of a marketplace action: no third-party code ever sees the private key.
+# Needs: secret EC2_SSH_PRIVATE_KEY, variables EC2_HOST (stack 20 output public_ip), APP_URL,
+# optional EC2_SSH_USER (ec2-user) and EC2_SSH_KNOWN_HOSTS (pinned host key line). Stack 20 opens
+# port 22 only for var.ssh_cidrs and needs var.key_name - both empty by default (SSM is the default).
+name: Deploy EC2 (SSH, build on server)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA or branch to build on the server. Empty = this run's commit."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    name: ssh build -> lab
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: lab
+      url: ${{ vars.APP_URL }}
+    concurrency:
+      group: deploy-lab-ec2-single
+      cancel-in-progress: false
+    env:
+      EC2_HOST: ${{ vars.EC2_HOST }}
+      SSH_USER: ${{ vars.EC2_SSH_USER || 'ec2-user' }}
+      APP_URL: ${{ vars.APP_URL }}
+      REF: ${{ inputs.ref || github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          [[ -n "$EC2_HOST" ]] || { echo "::error::set the EC2_HOST variable (stack 20 output public_ip)"; exit 1; }
+          [[ "$REF" =~ ^[A-Za-z0-9._/-]{1,100}$ ]] || { echo "::error::invalid ref: $REF"; exit 1; }
+
+      - name: Install the SSH key
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ vars.EC2_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SSH_KEY" ]] || { echo "::error::secret EC2_SSH_PRIVATE_KEY is not set"; exit 1; }
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [[ -n "$KNOWN_HOSTS" ]]; then
+            printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            # Trust-on-first-use: acceptable in a lab only. Pin the key (EC2_SSH_KNOWN_HOSTS) to
+            # stop a man-in-the-middle from receiving the deploy (and the build secrets).
+            echo "::warning::EC2_SSH_KNOWN_HOSTS not set - trusting the host key on first use"
+            ssh-keyscan -T 10 -t ed25519,ecdsa "$EC2_HOST" > ~/.ssh/known_hosts
+          fi
+
+      - name: Start the downtime probe
+        if: env.APP_URL != ''
+        run: |
+          STOP_FILE="$RUNNER_TEMP/probe.stop" OUT="$RUNNER_TEMP/probe.txt" \
+            nohup bash deploy/scripts/probe.sh "$APP_URL/ready" 0 0.2 > "$RUNNER_TEMP/probe.log" 2>&1 &
+
+      # The script runs as ec2-user (docker group). First run clones the repo to /opt/student-app/src
+      # (a private repo would also need a deploy key ON the server - one more secret to manage).
+      - name: Build and deploy on the server
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o ServerAliveInterval=30 -o ConnectTimeout=15 \
+              "$SSH_USER@$EC2_HOST" bash -s -- "$REF" "$REPO_URL" <<'REMOTE'
+          set -euo pipefail
+          ref="$1" repo="$2"
+          cd /opt/student-app
+          [ -d src/.git ] || git clone --quiet "$repo" src
+          cd src
+          git fetch --quiet --prune origin
+          git checkout --quiet "$ref"
+          # the scripts of the commit being deployed, not of the previous one
+          APP_DIR=/opt/student-app ./deploy/ec2/render-env-from-ssm.sh
+          ./deploy/ec2/deploy-build-on-server.sh "$ref"
+          REMOTE
+
+      - name: Stop the downtime probe
+        if: always() && env.APP_URL != ''
+        run: |
+          touch "$RUNNER_TEMP/probe.stop"
+          for _ in $(seq 1 30); do [[ -s "$RUNNER_TEMP/probe.txt" ]] && break; sleep 1; done
+          cat "$RUNNER_TEMP/probe.txt" 2>/dev/null || true
+
+      - name: Smoke test APP_URL
+        id: smoke
+        if: env.APP_URL != ''
+        run: |
+          set -euo pipefail
+          body=$(curl -fsS -m 5 --retry 12 --retry-delay 5 --retry-all-errors "$APP_URL/ready")
+          echo "$body" | jq .
+          [[ "$(jq -r .status <<<"$body")" == ready ]]
+          echo "version=$(jq -r .version <<<"$body")" >> "$GITHUB_OUTPUT"
+
+      - name: Job summary
+        if: always()
+        env:
+          SMOKE: ${{ steps.smoke.outcome }}
+          VERSION: ${{ steps.smoke.outputs.version }}
+        run: |
+          {
+            echo "### EC2 deploy over SSH (build on server) - scenario 31"
+            echo
+            echo "| Host | Ref | Smoke | Live version |"
+            echo "|---|---|---|---|"
+            echo "| \`$EC2_HOST\` | \`$REF\` | ${SMOKE:-skipped} | \`${VERSION:-?}\` |"
+            if [[ -s "$RUNNER_TEMP/probe.txt" ]]; then
+              echo; echo "**Downtime during the Recreate deploy**"; echo '```text'; cat "$RUNNER_TEMP/probe.txt"; echo '```'
+            fi
+            echo
+            echo "> Compare with **Deploy EC2 (SSM)**: no port 22, no stored key, the image is built and scanned once in CI."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

@@ -1,0 +1,95 @@
+{{- if .Values.migrations.enabled }}
+{{- $fullname := include "student-app.fullname" . }}
+{{- /*
+Helm: pre-install,pre-upgrade → migrations finish before any new pod exists (CONVENTIONS §8).
+With External Secrets the Secret is created by an ordinary release resource, i.e. *after* pre-install
+hooks — a pre-install Job would wait forever for it. So on the very first install the Job runs
+post-install (nothing to be compatible with yet); every upgrade is still pre-upgrade.
+Argo CD: the argocd.argoproj.io/hook annotation makes Argo ignore all Helm hooks and run this in the
+Sync phase at wave 0 — after the ExternalSecret (wave -1) is healthy, before the app (wave 1).
+*/}}
+{{- $helmHook := ternary "post-install,pre-upgrade" "pre-install,pre-upgrade" .Values.externalSecrets.enabled }}
+# Non-secret env for the migration, as a hook: on the first install the release ConfigMap does not
+# exist yet when pre-install hooks run.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-migrate
+  labels:
+    {{- include "student-app.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: {{ $helmHook }}
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  {{- include "student-app.configData" . | trim | nindent 2 }}
+---
+# `php artisan migrate --force` once per release, as a one-off Job (never at pod boot).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-migrate
+  labels:
+    {{- include "student-app.commonLabels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: {{ $helmHook }}
+    helm.sh/hook-weight: "0"
+    # Successful runs are cleaned up; a failed Job stays for `kubectl logs` until the next attempt.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  # One retry for a transient DB blip; a broken migration must fail the release, not loop.
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "student-app.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      # No serviceAccountName on purpose: the chart's ServiceAccount is an ordinary resource and does
+      # not exist yet when a pre-install hook runs. No token is mounted either way.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "student-app.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # `args`, not `command`: keeps the image ENTRYPOINT (and /etc/entrypoint.d) in place.
+          # No --isolated: it needs cache_locks, which a fresh database doesn't have (CONVENTIONS §2).
+          args: ["php", "artisan", "migrate", "--force"]
+          envFrom:
+            - configMapRef:
+                name: {{ $fullname }}-migrate
+            - secretRef:
+                name: {{ .Values.existingSecret }}
+          env:
+            {{- include "student-app.jobEnv" . | trim | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+{{- end }}

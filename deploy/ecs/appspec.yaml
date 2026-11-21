@@ -1,0 +1,28 @@
+# CodeDeploy AppSpec for the ECS service (scenarios 54, 58).
+#
+# <TASK_DEFINITION> is replaced with the ARN of the revision registered for this release:
+#   - CodePipeline CodeDeployToECS action (AppSpecTemplatePath: appspec.yaml)
+#   - GitHub Actions aws-actions/amazon-ecs-deploy-task-definition (codedeploy-appspec input)
+# The replacement task set reuses the service's network configuration and, without an explicit
+# CapacityProviderStrategy, the cluster default strategy (= the service strategy set by Terraform).
+version: 0.0
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: <TASK_DEFINITION>
+        LoadBalancerInfo:
+          ContainerName: app # CONVENTIONS: the container is always "app"
+          ContainerPort: 8080
+        PlatformVersion: LATEST
+
+# Optional lifecycle hooks (Lambda functions; CodeDeploy waits for PutLifecycleEventHookExecutionStatus).
+# AfterAllowTestTraffic is the classic place for a smoke test against the test listener before
+# production traffic moves (needs test_listener_arns in modules/codedeploy).
+#
+# Hooks:
+#   - BeforeInstall: "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:student-app-pre-deploy-check"
+#   - AfterInstall: "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:student-app-after-install"
+#   - AfterAllowTestTraffic: "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:student-app-smoke-test"
+#   - BeforeAllowTraffic: "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:student-app-before-traffic"
+#   - AfterAllowTraffic: "arn:aws:lambda:<REGION>:<ACCOUNT_ID>:function:student-app-slo-check"

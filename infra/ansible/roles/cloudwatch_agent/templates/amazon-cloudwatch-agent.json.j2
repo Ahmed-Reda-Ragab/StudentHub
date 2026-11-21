@@ -1,0 +1,31 @@
+{#- Managed by Ansible (role cloudwatch_agent). JSON has no comments, so the marker lives only here. -#}
+{%- set retention = cloudwatch_agent_log_retention_days | int -%}
+{%- set collect_list = (cloudwatch_agent_log_files | map('combine', {'retention_in_days': retention}) | list)
+      if retention > 0 else cloudwatch_agent_log_files -%}
+{{ {
+  'agent': {
+    'metrics_collection_interval': cloudwatch_agent_metrics_interval | int,
+    'run_as_user': 'root',
+  },
+  'metrics': {
+    'append_dimensions': {
+      'InstanceId': '${aws:InstanceId}',
+      'AutoScalingGroupName': '${aws:AutoScalingGroupName}',
+    },
+    'aggregation_dimensions': [['AutoScalingGroupName'], ['InstanceId']],
+    'metrics_collected': {
+      'mem': {'measurement': ['mem_used_percent']},
+      'swap': {'measurement': ['swap_used_percent']},
+      'disk': {
+        'measurement': ['used_percent'],
+        'resources': ['/'],
+        'ignore_file_system_types': ['sysfs', 'devtmpfs', 'tmpfs', 'overlay'],
+      },
+    },
+  },
+  'logs': {
+    'logs_collected': {
+      'files': {'collect_list': collect_list},
+    },
+  },
+} | to_nice_json(indent=2) }}

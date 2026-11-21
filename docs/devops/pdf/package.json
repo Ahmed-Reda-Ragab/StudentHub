@@ -1,0 +1,14 @@
+{
+  "name": "student-app-devops-docs-pdf",
+  "private": true,
+  "type": "module",
+  "description": "Builds docs/devops/SUMMARY.pdf and HANDBOOK.pdf (markdown → HTML → Edge/Chrome headless print).",
+  "scripts": {
+    "summary": "node assemble-summary.mjs && node build-pdf.mjs --summary",
+    "full": "node build-pdf.mjs --full",
+    "all": "node assemble-summary.mjs && node build-pdf.mjs --summary && node build-pdf.mjs --full"
+  },
+  "dependencies": {
+    "marked": "18.2.1"
+  }
+}

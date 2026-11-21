@@ -1,0 +1,67 @@
+# AnalysisTemplate: canary error rate from CloudWatch ALB metrics (scenario 68, no Prometheus needed).
+#
+# Metric math on the canary target group:  HTTPCode_Target_5XX_Count / RequestCount
+# Dimensions (CloudWatch "ARN suffixes"):
+#   LoadBalancer = app/student-app-lab-eks/0123456789abcdef
+#   TargetGroup  = targetgroup/k8s-studenta-studenta-0123456789/0123456789abcdef   (the CANARY TG)
+#   aws elbv2 describe-target-groups --query 'TargetGroups[].TargetGroupArn'  → take the part after ":"
+#
+# Requirements on the Argo Rollouts controller (Terraform 60-eks / apps/argo-rollouts.yaml):
+#   * IAM: cloudwatch:GetMetricData (Pod Identity on argo-rollouts/argo-rollouts)
+#   * env AWS_REGION on the controller Deployment
+# CloudWatch ALB metrics are 1-minute aggregates that arrive with ~1–2 min delay: this gate is slower
+# and coarser than Prometheus, but it measures what users actually got from the load balancer.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: alb-5xx-rate
+  namespace: student-app
+  labels:
+    app.kubernetes.io/part-of: student-app-lab
+spec:
+  args:
+    - name: load-balancer
+    - name: target-group
+  metrics:
+    - name: alb-5xx-rate
+      interval: 2m
+      # Give CloudWatch time to receive the first datapoints of the canary target group.
+      initialDelay: 2m
+      failureLimit: 1
+      # Every datapoint of the last 5 minutes must be ≤ 5%. No datapoint (no traffic) = pass.
+      successCondition: "len(result[0].Values) == 0 || all(result[0].Values, {# <= 0.05})"
+      provider:
+        cloudWatch:
+          interval: 5m
+          metricDataQueries:
+            - id: rate
+              expression: "IF(requests > 0, errors / requests, 0)"
+              label: canary 5xx ratio
+            - id: errors
+              metricStat:
+                metric:
+                  namespace: AWS/ApplicationELB
+                  metricName: HTTPCode_Target_5XX_Count
+                  dimensions:
+                    - name: LoadBalancer
+                      value: "{{args.load-balancer}}"
+                    - name: TargetGroup
+                      value: "{{args.target-group}}"
+                period: 60
+                stat: Sum
+                unit: Count
+              returnData: false
+            - id: requests
+              metricStat:
+                metric:
+                  namespace: AWS/ApplicationELB
+                  metricName: RequestCount
+                  dimensions:
+                    - name: LoadBalancer
+                      value: "{{args.load-balancer}}"
+                    - name: TargetGroup
+                      value: "{{args.target-group}}"
+                period: 60
+                stat: Sum
+                unit: Count
+              returnData: false

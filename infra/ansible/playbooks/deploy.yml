@@ -1,0 +1,15 @@
+---
+# CD with Ansible (scenario 33): deploy an image CI already built, scanned and pushed to ECR.
+# Recreate strategy (docker-compose.prod.yml) - zero-downtime variants: bluegreen.yml / canary.yml.
+#
+#   ansible-playbook playbooks/deploy.yml \
+#     -e app_image=123456789012.dkr.ecr.us-east-1.amazonaws.com/student-app:3f2c1ab
+#
+# Default hosts = app hosts that are NOT in an ASG: immutable ASG members are released with
+# deploy-asg.yml (instance refresh) or rolling-asg.yml, never patched in place by accident.
+- name: Deploy a release to the single-host stack
+  hosts: "{{ target_hosts | default('role_app:&standalone') }}"
+  become: true
+  gather_facts: false
+  roles:
+    - role: app

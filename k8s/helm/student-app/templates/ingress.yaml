@@ -1,0 +1,56 @@
+{{- if .Values.ingress.enabled }}
+{{- $fullname := include "student-app.fullname" . }}
+{{- $isAlb := eq .Values.ingress.className "alb" }}
+{{- $canaryAlb := and .Values.rollout.enabled (eq .Values.rollout.strategy "canary") .Values.rollout.canary.trafficRouting.alb.enabled }}
+{{- $annotations := deepCopy (default dict .Values.ingress.annotations) }}
+{{- if and $isAlb .Values.ingress.blockPaths }}
+{{- $_ := set $annotations "alb.ingress.kubernetes.io/actions.blocked-paths" `{"type":"fixed-response","fixedResponseConfig":{"contentType":"text/plain","statusCode":"404","messageBody":"Not Found"}}` }}
+{{- end }}
+# className alb → AWS Load Balancer Controller (EKS, scenario 63); anything else → that controller.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "student-app.labels" . | nindent 4 }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - http:
+        paths:
+          {{- if $isAlb }}
+          {{- range .Values.ingress.blockPaths }}
+          # Answered 404 by the ALB itself (rules are evaluated in order: blocks first).
+          - path: {{ . }}
+            pathType: Exact
+            backend:
+              service:
+                name: blocked-paths
+                port:
+                  name: use-annotation
+          {{- end }}
+          {{- end }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}
+                port:
+                  {{- if $canaryAlb }}
+                  # Argo Rollouts owns the forward action (stable/canary weights) for this backend.
+                  name: use-annotation
+                  {{- else }}
+                  name: http
+                  {{- end }}
+      {{- with .Values.ingress.host }}
+      host: {{ . | quote }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,10 @@
+---
+# ansible-lint --profile=production (also what .github/workflows/lint-infra.yml runs).
+profile: production
+
+exclude_paths:
+  - .cache/
+  - .ansible/
+  - collections/
+  # ansible-vault encrypted file (if you created it): not YAML until decrypted.
+  - inventories/lab/group_vars/all/vault.yml

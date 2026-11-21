@@ -1,0 +1,87 @@
+# AWS CodeBuild — build + push the image (scenarios 35, 36, 58).
+# Projects: student-app-image (stack 35, GitHub source) and <name>-pipeline-image (stack 36, CodePipeline).
+# Needs privileged mode (Docker daemon) and ECR push permissions on the student-app repository.
+#
+# Outputs (artifact root):
+#   imagedefinitions.json  [{"name":"app","imageUri":...}]   CodePipeline ECS deploy action
+#   imageDetail.json       {"ImageURI":...}                  CodeDeployToECS (<IMAGE1_NAME>) / buildspec-deploy-ecs.yml
+#   taskdef.json           rendered deploy/ecs/taskdef.json  CodeDeployToECS
+#   appspec.yaml           deploy/ecs/appspec.yaml           CodeDeployToECS
+version: 0.2
+
+env:
+  variables:
+    ECR_REPO: student-app
+    ENV_NAME: lab
+    TASKDEF_SOURCE: repo # repo = render deploy/ecs/taskdef.json | live = copy the newest revision of TASK_FAMILY (needs ecs:DescribeTaskDefinition)
+    TASK_FAMILY: ""      # live mode; default student-app-<ENV_NAME>-app
+    DOCKER_BUILDKIT: "1"
+  # Optional, mapped by the project from SSM (avoids Docker Hub anonymous pull limits on shared CodeBuild IPs):
+  #   DOCKERHUB_USERNAME / DOCKERHUB_TOKEN  (parameter_store_variables in modules/codebuild)
+  exported-variables: # -> #{BuildVariables.IMAGE_URI} in CodePipeline
+    - IMAGE_URI
+    - IMAGE_TAG
+
+phases:
+  pre_build:
+    commands:
+      - |
+        # CodeBuild does not expose the account id; the build ARN contains it (field 5).
+        export AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-$(echo "$CODEBUILD_BUILD_ARN" | cut -d ':' -f 5)}"
+        export REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        # Immutable tag = git short SHA (CONVENTIONS §2). Works for GitHub webhooks and CodePipeline sources.
+        export IMAGE_TAG="${IMAGE_TAG:-$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c1-7)}"
+        if [ -z "$IMAGE_TAG" ] || [ "$IMAGE_TAG" = "latest" ]; then
+          echo "cannot derive an immutable image tag from CODEBUILD_RESOLVED_SOURCE_VERSION"
+          exit 1
+        fi
+        export IMAGE_URI="${REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
+        echo "image -> $IMAGE_URI"
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+      - |
+        if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+          echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+        fi
+
+  build:
+    commands:
+      # The repository is IMMUTABLE: a re-run for the same commit must not fail on push.
+      # Build once, deploy many — reuse the image CI (or a previous run) already pushed.
+      - |
+        if aws ecr describe-images --repository-name "$ECR_REPO" --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+          echo "$IMAGE_URI already exists in ECR, skipping build"
+        else
+          docker build -f docker/Dockerfile \
+            --build-arg APP_VERSION="$IMAGE_TAG" \
+            --build-arg VCS_REF="$CODEBUILD_RESOLVED_SOURCE_VERSION" \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+        fi
+
+  post_build:
+    commands:
+      # post_build runs even when build failed: never publish artifacts for a broken build.
+      - |
+        if [ "$CODEBUILD_BUILD_SUCCEEDING" != "1" ]; then
+          echo "build failed - no deploy artifacts"
+          exit 1
+        fi
+      - printf '[{"name":"app","imageUri":"%s"}]\n' "$IMAGE_URI" > imagedefinitions.json
+      - printf '{"ImageURI":"%s"}\n' "$IMAGE_URI" > imageDetail.json
+      - |
+        if [ "$TASKDEF_SOURCE" = "live" ]; then
+          bash deploy/ecs/render-taskdef.sh live "${TASK_FAMILY:-student-app-${ENV_NAME}-app}" '<IMAGE1_NAME>' > taskdef.json
+        else
+          bash deploy/ecs/render-taskdef.sh repo deploy/ecs/taskdef.json > taskdef.json
+        fi
+      - cp deploy/ecs/appspec.yaml appspec.yaml
+      - cat imagedefinitions.json imageDetail.json
+
+artifacts:
+  files:
+    - imagedefinitions.json
+    - imageDetail.json
+    - taskdef.json
+    - appspec.yaml
+  discard-paths: yes

@@ -1,0 +1,48 @@
+# kube-prometheus-stack (Prometheus Operator, Prometheus, Alertmanager, Grafana) with the lab values
+# from observability/k8s/kube-prometheus-stack-values.yaml (incl. the PodMonitor that scrapes the
+# app pods). Multi-source: chart from the Helm repo, values file from this git repo.
+# The SLO rules (observability/k8s/prometheusrule-slo.yaml, namespace student-app) are applied
+# separately: kubectl apply -f observability/k8s/prometheusrule-slo.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: student-app-lab
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      targetRevision: 93.6.1
+      helm:
+        # Release name drives the Service names: kube-prometheus-stack-prometheus.monitoring:9090 is
+        # what the canary AnalysisTemplate queries (values-eks.yaml analysis.prometheus.address).
+        releaseName: kube-prometheus-stack
+        valueFiles:
+          - $values/observability/k8s/kube-prometheus-stack-values.yaml
+    - repoURL: https://github.com/Ahmed-Reda-Ragab/StudentHub.git
+      targetRevision: master
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # Prometheus Operator CRDs exceed the 256 KiB last-applied annotation of client-side apply.
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

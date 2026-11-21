@@ -1,0 +1,38 @@
+# App of apps (scenario 69): one root Application that syncs every child in k8s/argocd/apps/
+# (cluster add-ons + the app). Bootstrapping a fresh cluster = install Argo CD, apply this file.
+#
+#   kubectl apply -n argocd -f k8s/argocd/app-of-apps.yaml
+#
+# Do not let Terraform (60-eks helm_release) AND Argo CD manage the same add-on: pick one owner per
+# add-on (set the matching Terraform toggle off, or delete the child file here).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: student-app-lab
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: student-app-lab
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Ahmed-Reda-Ragab/StudentHub.git
+    targetRevision: master
+    path: k8s/argocd/apps
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    # Child Application objects live in the Argo CD namespace.
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

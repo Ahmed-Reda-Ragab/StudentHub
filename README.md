@@ -67,3 +67,25 @@ resources/views/
 ## Roadmap (spec phases 2–3)
 
 CSV export, editable WhatsApp templates (`message_templates`), WhatsApp Cloud API.
+
+## DevOps / SRE lab
+
+This app doubles as a hands-on lab for every AWS deployment path, each done once in the Console and once as code:
+
+- **Platforms:** EC2 + Docker Compose → ALB/ASG → ECS Fargate → EKS
+- **CI/CD:** GitHub Actions + CodeBuild/CodePipeline/CodeDeploy
+- **Zero-downtime strategies:** recreate, rolling, blue/green, canary, linear, A/B, shadow
+- **SRE measured for real:** SLOs, burn-rate alerts, k6, chaos
+
+| | |
+|---|---|
+| Start here (roadmap + 73 scenarios, Arabic) | [`docs/devops/README.md`](docs/devops/README.md) |
+| Conventions (names, ports, SSM layout, SLOs) | [`docs/devops/CONVENTIONS.md`](docs/devops/CONVENTIONS.md) |
+| One-file summary / full handbook | [`docs/devops/SUMMARY.pdf`](docs/devops/SUMMARY.pdf) · [`docs/devops/HANDBOOK.pdf`](docs/devops/HANDBOOK.pdf) |
+| Container | [`docker/`](docker) · [`docker-compose.yml`](docker-compose.yml) |
+| Infrastructure as code | [`infra/terraform`](infra/terraform) · [`infra/ansible`](infra/ansible) · [`infra/packer`](infra/packer) · [`k8s`](k8s) |
+| Deploy scripts | [`deploy/`](deploy) (single-host blue/green, canary, rolling, A/B, shadow) |
+| Observability & load tests | [`observability/`](observability) · [`loadtest/k6`](loadtest/k6) |
+| Pipelines | [`.github/workflows`](.github/workflows) |
+
+Health endpoints `/up` (liveness) and `/ready` (readiness, DB check) are always on. `/metrics` and `/sre-lab/*` are **off by default** (`METRICS_ENABLED`, `SRE_LAB_ENABLED`); see [`config/sre_lab.php`](config/sre_lab.php).

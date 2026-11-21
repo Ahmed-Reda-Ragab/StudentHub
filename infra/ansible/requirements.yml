@@ -1,0 +1,11 @@
+---
+# ansible-galaxy collection install -r requirements.yml
+# Versions verified on Galaxy (Nov 2026). The amazon.aws / community.aws 12.x line needs
+# ansible-core >= 2.18 and boto3/botocore >= 1.38 on the controller.
+collections:
+  - name: amazon.aws        # aws_ec2 inventory, aws_ssm connection
+    version: ">=12.1.0,<13.0.0"
+  - name: community.aws     # elb_target (scenario 47 drain), ssm_parameter (release pointer)
+    version: ">=12.0.0,<13.0.0"
+  - name: community.docker  # docker_container (node_exporter, ASG app container), docker_login
+    version: ">=5.4.0,<6.0.0"

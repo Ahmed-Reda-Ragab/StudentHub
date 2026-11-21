@@ -1,0 +1,750 @@
+{
+  "start": "-PT3H",
+  "periodOverride": "inherit",
+  "widgets": [
+    {
+      "type": "text",
+      "x": 0,
+      "y": 0,
+      "width": 24,
+      "height": 3,
+      "properties": {
+        "markdown": "# student-app-lab \u2014 SLOs on AWS\nAvailability SLO **99.5%** (budget 0.5%) \u00b7 Latency SLO **95% < 300ms** \u00b7 p99 < 1s \u2014 same numbers as k6 and Prometheus (docs/devops/CONVENTIONS.md \u00a75). Burn rate = error ratio / 0.005: page at 14.4x (1h) / 6x (6h), ticket at 1x (3d). Target 5xx = the app failed; ELB 5xx = no healthy target / timeout (502/503/504)."
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 3,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "ALB requests and 5xx (per minute)",
+        "region": "${AWS_REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 60,
+        "metrics": [
+          [
+            "AWS/ApplicationELB",
+            "RequestCount",
+            "LoadBalancer",
+            "${ALB_ARN_SUFFIX}",
+            {
+              "label": "Requests",
+              "stat": "Sum"
+            }
+          ],
+          [
+            ".",
+            "HTTPCode_Target_5XX_Count",
+            ".",
+            ".",
+            {
+              "label": "Target 5xx",
+              "stat": "Sum",
+              "color": "#d62728"
+            }
+          ],
+          [
+            ".",
+            "HTTPCode_ELB_5XX_Count",
+            ".",
+            ".",
+            {
+              "label": "ALB 5xx",
+              "stat": "Sum",
+              "color": "#ff7f0e"
+            }
+          ],
+          [
+            ".",
+            "HTTPCode_Target_4XX_Count",
+            ".",
+            ".",
+            {
+              "label": "Target 4xx",
+              "stat": "Sum",
+              "color": "#bcbd22"
+            }
+          ]
+        ],
+        "stat": "Sum"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 8,
+      "y": 3,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "Availability % (5-minute buckets) vs SLO",
+        "region": "${AWS_REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 300,
+        "metrics": [
+          [
+            {
+              "expression": "100 * (1 - (FILL(m2, 0) + FILL(m3, 0)) / m1)",
+              "label": "Availability %",
+              "id": "e1"
+            }
+          ],
+          [
+            "AWS/ApplicationELB",
+            "RequestCount",
+            "LoadBalancer",
+            "${ALB_ARN_SUFFIX}",
+            {
+              "id": "m1",
+              "stat": "Sum",
+              "visible": false
+            }
+          ],
+          [
+            ".",
+            "HTTPCode_Target_5XX_Count",
+            ".",
+            ".",
+            {
+              "id": "m2",
+              "stat": "Sum",
+              "visible": false
+            }
+          ],
+          [
+            ".",
+            "HTTPCode_ELB_5XX_Count",
+            ".",
+            ".",
+            {
+              "id": "m3",
+              "stat": "Sum",
+              "visible": false
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "min": 95,
+            "max": 100
+          }
+        },
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "SLO 99.5%",
+              "value": 99.5,
+              "color": "#d62728"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 3,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "Error-budget burn rate (5m and 1h)",
+        "region": "${AWS_REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 300,
+        "metrics": [
+          [
+            {
+              "expression": "((FILL(m2, 0) + FILL(m3, 0)) / m1) / 0.005",
+              "label": "burn 5m",
+              "id": "e1"
+            }
+          ],
+          [
+            {
+              "expression": "((FILL(m5, 0) + FILL(m6, 0)) / m4) / 0.005",
+              "label": "burn 1h",
+              "id": "e2"
+            }
+          ],
+          [
+            "AWS/ApplicationELB",
+            "RequestCount",
+            "LoadBalancer",
+            "${ALB_ARN_SUFFIX}",
+            {
+              "id": "m1",
+              "stat": "Sum",
+              "visible": false,
+              "period": 300
+            }
+          ],
+          [
+            ".",
+            "HTTPCode_Target_5XX_Count",
+            ".",
+            ".",
+            {
+              "id": "m2",
+              "stat": "Sum",
+              "visible": false,
+              "period": 300
+            }
+          ],
+          [
+            ".",
+            "HTTPCode_ELB_5XX_Count",
+            ".",
+            ".",
+            {
+              "id": "m3",
+              "stat": "Sum",
+              "visible": false,
+              "period": 300
+            }
+          ],
+          [
+            ".",
+            "RequestCount",
+            ".",
+            ".",
+            {
+              "id": "m4",
+              "stat": "Sum",
+              "visible": false,
+              "period": 3600
+            }
+          ],
+          [
+            ".",
+            "HTTPCode_Target_5XX_Count",
+            ".",
+            ".",
+            {
+              "id": "m5",
+              "stat": "Sum",
+              "visible": false,
+              "period": 3600
+            }
+          ],
+          [
+            ".",
+            "HTTPCode_ELB_5XX_Count",
+            ".",
+            ".",
+            {
+              "id": "m6",
+              "stat": "Sum",
+              "visible": false,
+              "period": 3600
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "min": 0
+          }
+        },
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "page 14.4x",
+              "value": 14.4,
+              "color": "#d62728"
+            },
+            {
+              "label": "page 6x",
+              "value": 6,
+              "color": "#ff7f0e"
+            },
+            {
+              "label": "ticket 1x",
+              "value": 1,
+              "color": "#bcbd22"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 9,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "Target response time p50 / p95 / p99 (seconds)",
+        "region": "${AWS_REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 60,
+        "metrics": [
+          [
+            "AWS/ApplicationELB",
+            "TargetResponseTime",
+            "LoadBalancer",
+            "${ALB_ARN_SUFFIX}",
+            {
+              "stat": "p50",
+              "label": "p50"
+            }
+          ],
+          [
+            ".",
+            ".",
+            ".",
+            ".",
+            {
+              "stat": "p95",
+              "label": "p95"
+            }
+          ],
+          [
+            ".",
+            ".",
+            ".",
+            ".",
+            {
+              "stat": "p99",
+              "label": "p99"
+            }
+          ]
+        ],
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "SLO 300ms",
+              "value": 0.3,
+              "color": "#ff7f0e"
+            },
+            {
+              "label": "tail SLO 1s",
+              "value": 1,
+              "color": "#d62728"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 8,
+      "y": 9,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "Latency SLI: % of requests <= 300ms (percentile rank)",
+        "region": "${AWS_REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 300,
+        "metrics": [
+          [
+            "AWS/ApplicationELB",
+            "TargetResponseTime",
+            "LoadBalancer",
+            "${ALB_ARN_SUFFIX}",
+            {
+              "stat": "PR(:0.3)",
+              "label": "% <= 300ms"
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "min": 80,
+            "max": 100
+          }
+        },
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "SLO 95%",
+              "value": 95,
+              "color": "#d62728"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 9,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "Healthy / unhealthy targets (blue + green)",
+        "region": "${AWS_REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 60,
+        "metrics": [
+          [
+            "AWS/ApplicationELB",
+            "HealthyHostCount",
+            "TargetGroup",
+            "${TG_BLUE_ARN_SUFFIX}",
+            "LoadBalancer",
+            "${ALB_ARN_SUFFIX}",
+            {
+              "stat": "Minimum",
+              "label": "blue healthy"
+            }
+          ],
+          [
+            ".",
+            "UnHealthyHostCount",
+            ".",
+            ".",
+            ".",
+            ".",
+            {
+              "stat": "Maximum",
+              "label": "blue unhealthy"
+            }
+          ],
+          [
+            ".",
+            "HealthyHostCount",
+            ".",
+            "${TG_GREEN_ARN_SUFFIX}",
+            ".",
+            ".",
+            {
+              "stat": "Minimum",
+              "label": "green healthy"
+            }
+          ],
+          [
+            ".",
+            "UnHealthyHostCount",
+            ".",
+            ".",
+            ".",
+            ".",
+            {
+              "stat": "Maximum",
+              "label": "green unhealthy"
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "min": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 15,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "ECS service CPU / memory utilisation %",
+        "region": "${AWS_REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 60,
+        "metrics": [
+          [
+            "AWS/ECS",
+            "CPUUtilization",
+            "ClusterName",
+            "${ECS_CLUSTER}",
+            "ServiceName",
+            "${ECS_SERVICE}",
+            {
+              "stat": "Average",
+              "label": "CPU avg"
+            }
+          ],
+          [
+            ".",
+            ".",
+            ".",
+            ".",
+            ".",
+            ".",
+            {
+              "stat": "Maximum",
+              "label": "CPU max"
+            }
+          ],
+          [
+            ".",
+            "MemoryUtilization",
+            ".",
+            ".",
+            ".",
+            ".",
+            {
+              "stat": "Average",
+              "label": "Memory avg"
+            }
+          ],
+          [
+            "ECS/ContainerInsights",
+            "RunningTaskCount",
+            "ClusterName",
+            "${ECS_CLUSTER}",
+            "ServiceName",
+            "${ECS_SERVICE}",
+            {
+              "stat": "Average",
+              "label": "running tasks",
+              "yAxis": "right"
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "max": 100
+          },
+          "right": {
+            "min": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 8,
+      "y": 15,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "ASG CPU % and instances in service",
+        "region": "${AWS_REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 60,
+        "metrics": [
+          [
+            "AWS/EC2",
+            "CPUUtilization",
+            "AutoScalingGroupName",
+            "${ASG_NAME}",
+            {
+              "stat": "Average",
+              "label": "CPU avg"
+            }
+          ],
+          [
+            "AWS/AutoScaling",
+            "GroupInServiceInstances",
+            "AutoScalingGroupName",
+            "${ASG_NAME}",
+            {
+              "stat": "Average",
+              "label": "in service",
+              "yAxis": "right"
+            }
+          ],
+          [
+            ".",
+            "GroupDesiredCapacity",
+            ".",
+            ".",
+            {
+              "stat": "Average",
+              "label": "desired",
+              "yAxis": "right"
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "max": 100
+          },
+          "right": {
+            "min": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 15,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "ALB active connections / new connections",
+        "region": "${AWS_REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 60,
+        "metrics": [
+          [
+            "AWS/ApplicationELB",
+            "ActiveConnectionCount",
+            "LoadBalancer",
+            "${ALB_ARN_SUFFIX}",
+            {
+              "stat": "Sum",
+              "label": "active"
+            }
+          ],
+          [
+            ".",
+            "NewConnectionCount",
+            ".",
+            ".",
+            {
+              "stat": "Sum",
+              "label": "new"
+            }
+          ],
+          [
+            ".",
+            "TargetConnectionErrorCount",
+            ".",
+            ".",
+            {
+              "stat": "Sum",
+              "label": "target connection errors"
+            }
+          ],
+          [
+            ".",
+            "RejectedConnectionCount",
+            ".",
+            ".",
+            {
+              "stat": "Sum",
+              "label": "rejected"
+            }
+          ]
+        ],
+        "stat": "Sum"
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 21,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "RDS CPU % and connections",
+        "region": "${AWS_REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 60,
+        "metrics": [
+          [
+            "AWS/RDS",
+            "CPUUtilization",
+            "DBInstanceIdentifier",
+            "${RDS_INSTANCE_ID}",
+            {
+              "stat": "Average",
+              "label": "CPU %"
+            }
+          ],
+          [
+            ".",
+            "DatabaseConnections",
+            ".",
+            ".",
+            {
+              "stat": "Maximum",
+              "label": "connections",
+              "yAxis": "right"
+            }
+          ]
+        ],
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "max": 100
+          },
+          "right": {
+            "min": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 8,
+      "y": 21,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "RDS read / write latency (seconds)",
+        "region": "${AWS_REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 60,
+        "metrics": [
+          [
+            "AWS/RDS",
+            "ReadLatency",
+            "DBInstanceIdentifier",
+            "${RDS_INSTANCE_ID}",
+            {
+              "stat": "Average",
+              "label": "read"
+            }
+          ],
+          [
+            ".",
+            "WriteLatency",
+            ".",
+            ".",
+            {
+              "stat": "Average",
+              "label": "write"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 21,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "RDS freeable memory / free storage (bytes)",
+        "region": "${AWS_REGION}",
+        "view": "timeSeries",
+        "stacked": false,
+        "period": 60,
+        "metrics": [
+          [
+            "AWS/RDS",
+            "FreeableMemory",
+            "DBInstanceIdentifier",
+            "${RDS_INSTANCE_ID}",
+            {
+              "stat": "Minimum",
+              "label": "freeable memory"
+            }
+          ],
+          [
+            ".",
+            "FreeStorageSpace",
+            ".",
+            ".",
+            {
+              "stat": "Minimum",
+              "label": "free storage",
+              "yAxis": "right"
+            }
+          ]
+        ]
+      }
+    }
+  ]
+}

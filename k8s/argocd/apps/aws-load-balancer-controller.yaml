@@ -1,0 +1,47 @@
+# AWS Load Balancer Controller — turns Ingress (class alb) into ALBs and keeps target groups in sync
+# with pod IPs (target-type ip). Chart pinned; bump deliberately.
+# IAM: Pod Identity association for kube-system/aws-load-balancer-controller (Terraform 60-eks).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aws-load-balancer-controller
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: student-app-lab
+  annotations:
+    # Before everything that creates Ingresses / Services (waves order creation; see README for health).
+    argocd.argoproj.io/sync-wave: "-3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://aws.github.io/eks-charts
+    chart: aws-load-balancer-controller
+    targetRevision: 3.6.3
+    helm:
+      releaseName: aws-load-balancer-controller
+      valuesObject:
+        # Placeholders: terraform -chdir=infra/terraform/stacks/60-eks output
+        clusterName: student-app-lab
+        region: us-east-1
+        vpcId: vpc-0123456789abcdef0
+        replicaCount: 2
+        serviceAccount:
+          create: true
+          name: aws-load-balancer-controller
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

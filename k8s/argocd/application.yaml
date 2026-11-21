@@ -1,0 +1,61 @@
+# Argo CD Application for the app itself (scenario 69, GitOps). Standalone version of
+# apps/student-app.yaml — apply ONE of them (same name, so applying both just overwrites).
+#
+#   kubectl apply -n argocd -f k8s/argocd/application.yaml
+#   argocd app get student-app            # or the UI: Synced / Healthy, resource tree, Rollout steps
+#
+# Flow: CI builds+pushes <sha> → deploy-eks.yml (mode=gitops-bump) opens a PR that changes image.tag
+# in k8s/helm/student-app/values-eks.yaml → merge → Argo CD syncs → Argo Rollouts runs the canary.
+# Rollback = `git revert` of that commit (Argo syncs the old tag back; the canary analysis aborts a
+# bad one before it gets there).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: student-app
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: student-app-lab
+  # Deleting the Application also deletes what it deployed (lab teardown in one command).
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Ahmed-Reda-Ragab/StudentHub.git
+    # Must be the branch the gitops-bump PRs target.
+    targetRevision: master
+    path: k8s/helm/student-app
+    helm:
+      releaseName: student-app
+      valueFiles:
+        - values-eks.yaml
+      # Image tag as an Argo CD parameter — deliberately NOT used here. A parameter set in this file
+      # or with `argocd app set student-app -p image.tag=<sha>` overrides values-eks.yaml and splits the
+      # desired state over two places (or out of git entirely). The tag lives in values-eks.yaml only.
+      # parameters:
+      #   - name: image.tag
+      #     value: "3f2c1ab"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: student-app
+  syncPolicy:
+    automated:
+      prune: true        # objects removed from git are removed from the cluster
+      selfHeal: true     # manual `kubectl edit` drift is reverted
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        # AWS LBC readiness gates: a pod is Ready only once its ALB target is healthy.
+        elbv2.k8s.aws/pod-readiness-gate-inject: enabled
+    syncOptions:
+      - CreateNamespace=true
+      # Rollout / ExternalSecret CRDs may not exist yet on the very first sync (add-ons syncing too).
+      - SkipDryRunOnMissingResource=true
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+  revisionHistoryLimit: 10

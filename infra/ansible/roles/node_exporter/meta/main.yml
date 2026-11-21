@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  author: Ahmed Reda
+  description: Prometheus node_exporter as a container (host network and pid namespace, port 9100)
+  company: StudentHub DevOps lab
+  license: MIT
+  min_ansible_version: "2.20"
+  platforms:
+    - name: Amazon Linux
+      versions:
+        - "2023"
+  galaxy_tags:
+    - monitoring
+    - prometheus
+    - metrics
+dependencies: []

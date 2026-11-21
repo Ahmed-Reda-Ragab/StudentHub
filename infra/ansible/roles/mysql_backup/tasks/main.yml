@@ -1,0 +1,37 @@
+---
+- name: Validate the backup bucket
+  ansible.builtin.assert:
+    that: mysql_backup_bucket | length > 0
+    fail_msg: "Set backup_bucket (terraform -chdir=infra/terraform/stacks/20-ec2-single output -raw backup_bucket)."
+    quiet: true
+
+- name: Install the backup script
+  ansible.builtin.copy:
+    src: "{{ mysql_backup_repo_root }}/deploy/ec2/backup-mysql-to-s3.sh"
+    dest: "{{ mysql_backup_app_dir }}/backup-mysql-to-s3.sh"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the systemd service and timer
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ mysql_backup_unit }}.{{ item.ext }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { src: backup.service.j2, ext: service }
+    - { src: backup.timer.j2, ext: timer }
+  loop_control:
+    label: "{{ mysql_backup_unit }}.{{ item.ext }}"
+  notify: Reload systemd
+
+- name: Load unit changes before enabling the timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable the daily backup timer
+  ansible.builtin.systemd_service:
+    name: "{{ mysql_backup_unit }}.timer"
+    enabled: true
+    state: started

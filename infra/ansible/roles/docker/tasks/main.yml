@@ -1,0 +1,94 @@
+---
+# python3-requests: needed by community.docker modules on the host (node_exporter, ASG container).
+- name: Install Docker Engine
+  ansible.builtin.dnf:
+    name:
+      - docker
+      - python3-requests
+    state: present
+
+- name: Map the CPU architecture to release asset names
+  ansible.builtin.set_fact:
+    docker_compose_arch: "{{ 'aarch64' if ansible_architecture == 'aarch64' else 'x86_64' }}"
+    docker_buildx_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}"
+
+- name: Create plugin directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ docker_cli_plugins_dir }}"
+    - "{{ docker_plugin_store }}"
+
+# Versioned file names make a version bump download a new binary (get_url never re-downloads an
+# existing dest); the symlink switch below is then the "upgrade".
+- name: Download the Docker Compose plugin
+  ansible.builtin.get_url:
+    url: "https://github.com/docker/compose/releases/download/{{ docker_compose_version }}/docker-compose-linux-{{ docker_compose_arch }}"
+    dest: "{{ docker_plugin_store }}/docker-compose-{{ docker_compose_version }}"
+    checksum: "{{ ('sha256:' ~ docker_compose_sha256) if docker_compose_sha256 | length > 0 else omit }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download the Docker Buildx plugin
+  ansible.builtin.get_url:
+    url: "https://github.com/docker/buildx/releases/download/{{ docker_buildx_version }}/buildx-{{ docker_buildx_version }}.linux-{{ docker_buildx_arch }}"
+    dest: "{{ docker_plugin_store }}/docker-buildx-{{ docker_buildx_version }}"
+    checksum: "{{ ('sha256:' ~ docker_buildx_sha256) if docker_buildx_sha256 | length > 0 else omit }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+# force: user-data.sh drops plain files at the same paths; they are replaced by the symlinks.
+- name: Activate the pinned CLI plugins
+  ansible.builtin.file:
+    src: "{{ docker_plugin_store }}/docker-{{ item }}-{{ lookup('ansible.builtin.vars', 'docker_' ~ item ~ '_version') }}"
+    dest: "{{ docker_cli_plugins_dir }}/docker-{{ item }}"
+    state: link
+    force: true
+  loop:
+    - compose
+    - buildx
+
+- name: Create /etc/docker
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Both handlers fire, reload first: SIGHUP turns live-restore on, so the restart that applies the
+# log options no longer stops running containers (even on a host that never had live-restore).
+- name: Configure the Docker daemon
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+    validate: dockerd --validate --config-file=%s
+  notify:
+    - Reload docker
+    - Restart docker
+
+- name: Enable and start Docker
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started
+
+# The docker group is root-equivalent; acceptable for the lab's ec2-user (SSM sessions are root anyway).
+- name: Let the admin users run docker without sudo
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_users }}"
+
+- name: Apply daemon changes before anything else uses Docker
+  ansible.builtin.meta: flush_handlers

@@ -1,0 +1,14 @@
+# Override: ship container logs straight to CloudWatch Logs (scenario 70).
+#   docker compose -f docker-compose.prod.yml -f deploy/ec2/compose.awslogs.yml up -d
+# The instance profile needs logs:CreateLogGroup/CreateLogStream/PutLogEvents.
+services:
+    app:
+        logging:
+            driver: awslogs
+            options:
+                awslogs-region: ${AWS_REGION:-us-east-1}
+                awslogs-group: /student-app/lab/app
+                awslogs-create-group: "true"
+                awslogs-stream: ${HOSTNAME:-ec2}-app
+                mode: non-blocking
+                max-buffer-size: 4m

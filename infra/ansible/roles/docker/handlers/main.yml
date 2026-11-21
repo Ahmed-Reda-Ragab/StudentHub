@@ -1,0 +1,11 @@
+---
+# Handlers run in the order listed here, not in notify order: reload must come first.
+- name: Reload docker
+  ansible.builtin.systemd_service:
+    name: docker
+    state: reloaded
+
+- name: Restart docker
+  ansible.builtin.systemd_service:
+    name: docker
+    state: restarted

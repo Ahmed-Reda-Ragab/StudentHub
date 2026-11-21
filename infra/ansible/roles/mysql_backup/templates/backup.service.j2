@@ -1,0 +1,20 @@
+# {{ ansible_managed }} (role mysql_backup)
+# Run now:   sudo systemctl start {{ mysql_backup_unit }}.service
+# Logs:      journalctl -u {{ mysql_backup_unit }}.service
+[Unit]
+Description=student-app: dump the MySQL container to s3://{{ mysql_backup_bucket }} (scenario 27)
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Environment=APP_DIR={{ mysql_backup_app_dir }}
+Environment=BACKUP_BUCKET={{ mysql_backup_bucket }}
+Environment=DB_NAME={{ mysql_backup_db_name }}
+Environment=AWS_REGION={{ mysql_backup_aws_region }}
+ExecStart={{ mysql_backup_app_dir }}/backup-mysql-to-s3.sh
+# A dump must not steal CPU/IO from the app it is protecting.
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=1h

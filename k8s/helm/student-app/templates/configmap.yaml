@@ -1,0 +1,11 @@
+# Environment-scoped, non-secret config (values: config). Release-scoped values (DEPLOY_COLOR,
+# SRE_FAULT_*, extraEnv) are in the pod template instead — see _helpers.tpl.
+# Pods are restarted on change through the checksum/config annotation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "student-app.fullname" . }}
+  labels:
+    {{- include "student-app.labels" . | nindent 4 }}
+data:
+  {{- include "student-app.configData" . | trim | nindent 2 }}

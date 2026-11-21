@@ -1,0 +1,24 @@
+---
+- name: Install the CloudWatch agent
+  ansible.builtin.dnf:
+    name: amazon-cloudwatch-agent
+    state: present
+
+- name: Write the agent configuration
+  ansible.builtin.template:
+    src: amazon-cloudwatch-agent.json.j2
+    dest: "{{ cloudwatch_agent_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Load the CloudWatch agent configuration
+
+# fetch-config translates the JSON into the agent's TOML; it must run before the first start.
+- name: Apply the configuration now
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start the CloudWatch agent
+  ansible.builtin.systemd_service:
+    name: amazon-cloudwatch-agent
+    enabled: true
+    state: started

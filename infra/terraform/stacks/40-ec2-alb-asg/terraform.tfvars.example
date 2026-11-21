@@ -1,0 +1,38 @@
+# cp terraform.tfvars.example terraform.tfvars   (terraform.tfvars is not committed)
+
+region   = "us-east-1"
+scenario = "40" # tag only: the scenario you are practising (40-49)
+
+# A git short SHA that CI already pushed to ECR (aws ecr list-images --repository-name student-app).
+image_tag = "3f2c1ab"
+
+instance_type    = "t3.micro"
+min_size         = 1
+max_size         = 4
+desired_capacity = 2
+
+# ---- blue/green + canary (scenarios 44-46)
+# green_enabled = true
+# blue_weight   = 90
+# green_weight  = 10
+# stickiness_duration = 300
+
+# ---- golden AMI from Packer (scenario 43)
+# ami_id     = "ami-0123456789abcdef0"
+# golden_ami = true
+
+# ---- Spot (scenario 48)
+# spot_enabled        = true
+# spot_instance_types = ["t3.micro", "t3a.micro", "t2.micro"]
+
+# ---- Redis sessions/cache (scenario 49)
+# redis_enabled = true
+
+# ---- production-like network (NAT, ~32 USD/month extra)
+# private_instances = true
+
+# ---- HTTPS with your own domain
+# domain_name    = "lab.example.com"
+# hosted_zone_id = "Z0123456789ABCDEFGHIJ"
+
+# alarm_email = "you@example.com"

@@ -1,0 +1,295 @@
+# Kubernetes integration — the kind lab on GitHub runners (no local Docker needed). Scenarios 60–68.
+#
+#   1. build two releases of the image (ci-v1, ci-v2) and load them into a 3-node kind cluster
+#   2. lab MySQL + Secret, `helm upgrade --install` (migrations as a pre-install hook), smoke via localhost:8088
+#   3. zero-downtime RollingUpdate ci-v1 → ci-v2 while probe.sh asserts 0 failed requests
+#   4. Argo Rollouts + Prometheus: the same release becomes a canary Rollout with background analysis
+#        healthy canary  → promoted (Healthy)
+#        bad canary (SRE_FAULT_ERROR_RATE=0.5 under /login traffic) → analysis aborts it (Degraded),
+#        stable keeps serving with 0 failed /ready requests; `helm rollback` → Healthy again
+#
+# Single-host equivalent with nginx: lab-integration.yml. Static checks of k8s/: lint-infra.yml.
+name: K8s integration
+
+on:
+  push:
+    branches: [devops-lab, main, master]
+    paths:
+      - "k8s/**"
+      - "docker/**"
+      - "app/**"
+      - "routes/**"
+      - "bootstrap/**"
+      - "config/**"
+      - "database/**"
+      - "deploy/scripts/**"
+      - ".github/workflows/k8s-integration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k8s-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CLUSTER: student-app-lab          # name in k8s/kind/cluster.yaml
+  NS: student-app
+  RELEASE: student-app
+  CHART: k8s/helm/student-app
+  BASE: http://127.0.0.1:8088       # kind extraPortMappings: host 8088 → NodePort 30080
+  KIND_VERSION: v0.33.0
+  HELM_VERSION: v4.3.2
+  ARGO_ROLLOUTS_VERSION: v1.10.2
+  PROMETHEUS_CHART_VERSION: 29.48.0
+
+jobs:
+  kind:
+    name: kind · Helm · zero-downtime · Argo Rollouts canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ci-v1
+        uses: docker/build-push-action@v7
+        timeout-minutes: 15
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: student-app:ci-v1
+          build-args: APP_VERSION=ci-v1
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build ci-v2 (same code, new release id — only the last layer differs)
+        uses: docker/build-push-action@v7
+        timeout-minutes: 10
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: student-app:ci-v2
+          build-args: APP_VERSION=ci-v2
+          cache-from: type=gha
+
+      - name: Create kind cluster (1 control-plane + 2 workers)
+        uses: helm/kind-action@v1
+        timeout-minutes: 6
+        with:
+          version: ${{ env.KIND_VERSION }}
+          config: k8s/kind/cluster.yaml
+          cluster_name: ${{ env.CLUSTER }}
+          wait: 180s
+
+      - name: Load both images into the nodes (no registry involved)
+        timeout-minutes: 5
+        run: kind load docker-image student-app:ci-v1 student-app:ci-v2 --name "$CLUSTER"
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: kubectl-argo-rollouts plugin (pinned, checksum verified)
+        timeout-minutes: 2
+        run: |
+          base="https://github.com/argoproj/argo-rollouts/releases/download/${ARGO_ROLLOUTS_VERSION}"
+          cd "$RUNNER_TEMP" || exit 1
+          curl -fsSLO "$base/kubectl-argo-rollouts-linux-amd64"
+          curl -fsSL "$base/argo-rollouts-checksums.txt" | grep ' kubectl-argo-rollouts-linux-amd64$' | sha256sum -c -
+          sudo install -m 0755 kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
+          kubectl argo rollouts version
+
+      - name: Namespace (Pod Security "restricted") + lab MySQL
+        timeout-minutes: 5
+        run: |
+          kubectl apply -f k8s/manifests/base/namespace.yaml
+          kubectl apply -f k8s/kind/mysql.yaml
+          kubectl -n "$NS" rollout status statefulset/mysql --timeout=240s
+
+      - name: App Secret (on EKS External Secrets writes it from SSM)
+        run: |
+          db_password=$(kubectl -n "$NS" get secret mysql-credentials -o jsonpath='{.data.MYSQL_PASSWORD}' | base64 -d)
+          echo "::add-mask::$db_password"
+          kubectl -n "$NS" create secret generic student-app-secrets \
+            --from-literal=APP_KEY="base64:$(openssl rand -base64 32)" \
+            --from-literal=DB_USERNAME=student \
+            --from-literal=DB_PASSWORD="$db_password" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: helm install ci-v1 (pre-install hook runs the migrations first)
+        timeout-minutes: 8
+        run: |
+          helm upgrade --install "$RELEASE" "$CHART" -n "$NS" \
+            -f "$CHART/values-kind.yaml" --set-string image.tag=ci-v1 \
+            --wait --timeout 6m
+          kubectl -n "$NS" get pods -o wide
+
+      - name: Smoke tests through the kind port mapping
+        timeout-minutes: 3
+        run: |
+          set -x
+          curl -fsS --retry 15 --retry-delay 2 --retry-all-errors "$BASE/up" >/dev/null
+          curl -fsS "$BASE/ready" | tee /dev/stderr | grep -q '"status":"ready"'
+          curl -fsS "$BASE/ready" | grep -q '"version":"ci-v1"'
+          # /login needs the sessions table → proves the migration hook ran before the app.
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/login")" = 200
+          # Captured first: `curl | grep -q` on a multi-KB body can SIGPIPE curl under pipefail.
+          metrics=$(curl -fsS "$BASE/metrics")
+          grep -q 'student_app_app_info{version="ci-v1"' <<<"$metrics"
+          kubectl -n "$NS" get svc,networkpolicy,pdb,configmap
+
+      - name: "Zero-downtime RollingUpdate ci-v1 → ci-v2 (probe: 0 failed requests)"
+        timeout-minutes: 10
+        run: |
+          stop="$RUNNER_TEMP/stop-rolling"
+          STOP_FILE="$stop" MAX_FAILURES=0 OUT=probe-rolling.txt \
+            bash deploy/scripts/probe.sh "$BASE/ready" 0 0.05 &
+          probe=$!
+          sleep 2
+
+          helm upgrade "$RELEASE" "$CHART" -n "$NS" \
+            -f "$CHART/values-kind.yaml" --set-string image.tag=ci-v2 \
+            --wait --timeout 6m
+
+          # Helm returns once the new pods are Ready; keep probing until the old pods have finished
+          # their preStop sleep and graceful shutdown — that is where dropped requests would show up.
+          deadline=$((SECONDS + 120))
+          while kubectl -n "$NS" get pods -l app.kubernetes.io/component=web,app.kubernetes.io/version=ci-v1 -o name | grep -q .; do
+            (( SECONDS < deadline )) || { echo "::error::ci-v1 pods still present after 120 s"; exit 1; }
+            sleep 2
+          done
+          sleep 3
+          touch "$stop"
+          wait "$probe"      # probe.sh exits 1 when failed > MAX_FAILURES
+
+          for _ in $(seq 1 10); do curl -fsS "$BASE/ready" | grep -q '"version":"ci-v2"'; done
+          { echo '### RollingUpdate ci-v1 → ci-v2'; echo '~~~'; cat probe-rolling.txt; echo '~~~'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Argo Rollouts ${{ env.ARGO_ROLLOUTS_VERSION }}
+        timeout-minutes: 5
+        run: |
+          kubectl create namespace argo-rollouts --dry-run=client -o yaml | kubectl apply -f -
+          # Server-side apply: the CRDs are too big for client-side apply's last-applied annotation.
+          kubectl apply --server-side -n argo-rollouts \
+            -f "https://github.com/argoproj/argo-rollouts/releases/download/${ARGO_ROLLOUTS_VERSION}/install.yaml"
+          kubectl -n argo-rollouts rollout status deployment/argo-rollouts --timeout=180s
+
+      - name: Install a minimal Prometheus (pod annotation discovery, 10 s scrapes)
+        timeout-minutes: 6
+        run: |
+          helm upgrade --install prometheus prometheus \
+            --repo https://prometheus-community.github.io/helm-charts \
+            --version "$PROMETHEUS_CHART_VERSION" \
+            -n monitoring --create-namespace \
+            --set alertmanager.enabled=false \
+            --set prometheus-pushgateway.enabled=false \
+            --set prometheus-node-exporter.enabled=false \
+            --set kube-state-metrics.enabled=false \
+            --set server.persistentVolume.enabled=false \
+            --set server.retention=2h \
+            --set server.global.scrape_interval=10s \
+            --set server.global.evaluation_interval=30s \
+            --wait --timeout 5m
+
+      - name: Switch the release to an Argo Rollout (canary + background analysis)
+        timeout-minutes: 6
+        run: |
+          # The Deployment is replaced by a Rollout with the same pod template. A Rollout's first
+          # revision is deployed at full scale without steps.
+          helm upgrade "$RELEASE" "$CHART" -n "$NS" \
+            -f "$CHART/values-kind.yaml" --set-string image.tag=ci-v2 \
+            --set rollout.enabled=true --timeout 5m
+          kubectl argo rollouts status "$RELEASE" -n "$NS" --timeout 240s
+          kubectl argo rollouts get rollout "$RELEASE" -n "$NS"
+
+      - name: "Canary: healthy release promoted, bad release aborted by analysis, stable never fails"
+        timeout-minutes: 15
+        run: |
+          canary() {  # $1 = image tag, extra args = more --set flags
+            local tag=$1; shift
+            helm upgrade "$RELEASE" "$CHART" -n "$NS" -f "$CHART/values-kind.yaml" \
+              --set-string image.tag="$tag" --set rollout.enabled=true --timeout 5m "$@"
+          }
+          gone() {  # wait until no app pod of release $1 is left (scale-down respects maxUnavailable 0)
+            local deadline=$((SECONDS + 150))
+            while kubectl -n "$NS" get pods -l "app.kubernetes.io/component=web,app.kubernetes.io/version=$1" -o name | grep -q .; do
+              (( SECONDS < deadline )) || { echo "::error::$1 pods still present after 150 s"; return 1; }
+              sleep 2
+            done
+          }
+
+          # Real user traffic for the analysis (a bad canary fails ~50% of its share of it) and an
+          # availability probe on /ready that must stay perfect through every step below.
+          STOP_FILE="$RUNNER_TEMP/stop-traffic" OUT=traffic.txt \
+            bash deploy/scripts/probe.sh "$BASE/login" 0 0.05 > traffic.log 2>&1 &
+          traffic=$!
+          STOP_FILE="$RUNNER_TEMP/stop-ready" MAX_FAILURES=0 OUT=probe-rollouts.txt \
+            bash deploy/scripts/probe.sh "$BASE/ready" 0 0.1 > ready-probe.log 2>&1 &
+          ready=$!
+
+          echo "::group::healthy canary ci-v2 → ci-v1"
+          canary ci-v1
+          kubectl argo rollouts status "$RELEASE" -n "$NS" --timeout 300s
+          gone ci-v2
+          for _ in $(seq 1 10); do curl -fsS "$BASE/ready" | grep -q '"version":"ci-v1"'; done
+          kubectl -n "$NS" get analysisrun
+          echo "::endgroup::"
+
+          echo "::group::bad canary ci-v2 with SRE_FAULT_ERROR_RATE=0.5"
+          canary ci-v2 --set-string extraEnv.SRE_FAULT_ERROR_RATE=0.5
+          if kubectl argo rollouts status "$RELEASE" -n "$NS" --timeout 300s; then
+            echo "::error::the bad release was promoted — the analysis did not catch it"
+            exit 1
+          fi
+          kubectl argo rollouts get rollout "$RELEASE" -n "$NS"
+          kubectl -n "$NS" get analysisrun
+          test "$(kubectl -n "$NS" get rollout "$RELEASE" -o jsonpath='{.status.phase}')" = Degraded
+          test "$(kubectl -n "$NS" get rollout "$RELEASE" -o jsonpath='{.status.abort}')" = true
+          # Abort = 100% back to stable: stable is scaled up again, then the canary pod is removed.
+          gone ci-v2
+          for _ in $(seq 1 20); do curl -fsS "$BASE/ready" | grep -q '"version":"ci-v1"'; done
+          echo "::endgroup::"
+
+          echo "::group::rollback: git-revert equivalent → spec == stable → Healthy without steps"
+          helm rollback "$RELEASE" -n "$NS" --timeout 5m
+          kubectl argo rollouts status "$RELEASE" -n "$NS" --timeout 180s
+          echo "::endgroup::"
+
+          sleep 3
+          touch "$RUNNER_TEMP/stop-traffic" "$RUNNER_TEMP/stop-ready"
+          wait "$traffic" || true
+          ready_rc=0
+          wait "$ready" || ready_rc=$?
+          {
+            echo '### Argo Rollouts canary drills'
+            echo '/ready availability (must be 100%):'; echo '~~~'; cat probe-rollouts.txt; echo '~~~'
+            echo '/login user traffic (the bad canary is expected to fail part of it):'; echo '~~~'; cat traffic.txt; echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat probe-rollouts.txt traffic.txt
+          exit "$ready_rc"
+
+      - name: Diagnostics on failure
+        if: failure()
+        timeout-minutes: 5
+        run: |
+          set +e
+          kubectl get nodes -o wide
+          kubectl get pods -A -o wide
+          kubectl -n "$NS" get all,networkpolicy,pdb,hpa,configmap,secret,job
+          kubectl -n "$NS" describe pods
+          kubectl -n "$NS" logs -l app.kubernetes.io/name=student-app --all-containers --prefix --tail=100
+          kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -60
+          helm -n "$NS" history "$RELEASE"
+          kubectl argo rollouts get rollout "$RELEASE" -n "$NS"
+          kubectl -n "$NS" get analysisrun -o yaml | tail -120
+          kubectl -n argo-rollouts logs deployment/argo-rollouts --tail=100
+          tail -n 40 traffic.log ready-probe.log probe-rolling.txt

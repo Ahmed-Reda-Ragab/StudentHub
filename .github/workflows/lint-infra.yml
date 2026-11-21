@@ -1,0 +1,160 @@
+# Static checks for everything that is not PHP (scenarios 82, 90–93).
+# Each job only lints — nothing here talks to AWS.
+name: Lint infrastructure
+
+on:
+  push:
+    branches: [master, main, devops-lab]
+    paths:
+      - "infra/**"
+      - "k8s/**"
+      - "deploy/**"
+      - "docker/**"
+      - "docker-compose*.yml"
+      - "observability/**"
+      - "loadtest/**"
+      - ".github/workflows/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  shell:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: shellcheck (preinstalled on ubuntu runners)
+        run: |
+          mapfile -t files < <(git ls-files '*.sh')
+          echo "checking ${#files[@]} scripts"
+          shellcheck --version
+          shellcheck -x -S warning "${files[@]}"
+
+  actionlint:
+    name: actionlint (workflows)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
+
+  compose:
+    name: Compose files render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: |
+          export APP_KEY=base64:dummy
+          docker compose -f docker-compose.yml config -q
+          touch /tmp/app.env /tmp/mysql.env
+          APP_ENV_FILE=/tmp/app.env MYSQL_ENV_FILE=/tmp/mysql.env docker compose -f docker-compose.prod.yml config -q
+          APP_ENV_FILE=/tmp/app.env BLUE_IMAGE=x GREEN_IMAGE=x docker compose -f deploy/ec2/lb/docker-compose.yml config -q
+          for f in $(git ls-files 'observability/**/docker-compose*.yml'); do echo "$f"; docker compose -f "$f" config -q; done
+
+  terraform:
+    name: Terraform fmt · validate · tflint · checkov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - name: fmt
+        run: terraform fmt -check -recursive -diff infra/terraform
+      - name: validate every root module (no backend, no AWS calls)
+        run: |
+          shopt -s nullglob
+          status=0
+          for dir in infra/terraform/bootstrap infra/terraform/stacks/*/; do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -input=false -no-color >/dev/null || status=1
+            terraform -chdir="$dir" validate -no-color || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+      - uses: terraform-linters/setup-tflint@v4
+      - name: tflint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}   # avoids GitHub API rate limits when downloading the AWS ruleset
+        run: |
+          # --recursive reads each directory's own .tflint.hcl, so pass the shared one by absolute path.
+          cfg="$PWD/infra/terraform/.tflint.hcl"
+          tflint --init --config="$cfg"
+          tflint --recursive --chdir=infra/terraform --config="$cfg" --minimum-failure-severity=error
+      - name: checkov (report only — findings are discussed in scenario 82)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra/terraform
+          framework: terraform
+          soft_fail: true
+          quiet: true
+
+  ansible:
+    name: ansible-lint · syntax-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ansible-core ansible-lint boto3 botocore
+      - name: collections
+        working-directory: infra/ansible
+        run: '[ -f requirements.yml ] && ansible-galaxy collection install -r requirements.yml || true'
+      - name: syntax-check every playbook
+        working-directory: infra/ansible
+        run: |
+          for pb in playbooks/*.yml; do
+            ansible-playbook --syntax-check -i inventories/lab/hosts.ini.example "$pb"
+          done
+      - name: ansible-lint
+        working-directory: infra/ansible
+        run: ansible-lint --profile=production --nocolor
+
+  kubernetes:
+    name: helm lint · kubeconform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v4
+      - name: kubeconform
+        env:
+          KUBECONFORM_VERSION: v0.6.7 # pinned (Dependabot cannot see curl downloads — bump by hand)
+        run: |
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" | tar xz
+          sudo mv kubeconform /usr/local/bin/
+      - name: helm lint + render + validate
+        run: |
+          helm lint k8s/helm/student-app
+          for values in k8s/helm/student-app/values*.yaml; do
+            echo "::group::$values"
+            helm template lab k8s/helm/student-app -f "$values" \
+              | kubeconform -strict -summary -ignore-missing-schemas \
+                  -schema-location default \
+                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+            echo "::endgroup::"
+          done
+      - name: plain manifests, rollouts, argocd
+        run: |
+          find k8s -path k8s/helm -prune -o \( -name '*.yaml' -o -name '*.yml' \) -print \
+            | xargs kubeconform -strict -summary -ignore-missing-schemas \
+                -schema-location default \
+                -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+
+  packer:
+    name: Packer validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hashicorp/setup-packer@v3
+      - working-directory: infra/packer
+        run: |
+          packer init .
+          packer fmt -check .
+          packer validate -syntax-only .

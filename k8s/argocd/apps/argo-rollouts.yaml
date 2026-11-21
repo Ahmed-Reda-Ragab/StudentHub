@@ -1,0 +1,57 @@
+# Argo Rollouts controller + dashboard (canary / blue-green, scenarios 67–68). Chart pinned
+# (chart 2.43.12 = Argo Rollouts v1.10.2).
+# IAM (only for analysis-cloudwatch.yaml / --aws-verify-target-group): Pod Identity association for
+# argo-rollouts/argo-rollouts with cloudwatch:GetMetricData and elasticloadbalancing:Describe*.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-rollouts
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: student-app-lab
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-rollouts
+    targetRevision: 2.43.12
+    helm:
+      releaseName: argo-rollouts
+      valuesObject:
+        installCRDs: true
+        controller:
+          # Region for the CloudWatch metric provider.
+          extraEnv:
+            - name: AWS_REGION
+              value: us-east-1
+          metrics:
+            enabled: true
+            serviceMonitor:
+              enabled: true
+        serviceAccount:
+          create: true
+          name: argo-rollouts
+        dashboard:
+          enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-rollouts
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      # The ServiceMonitor needs kube-prometheus-stack's CRDs, which may still be syncing.
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

@@ -1,0 +1,32 @@
+---
+# Single-host zero-downtime stack (deploy/ec2/lb, scenarios 23-26): nginx proxy -> app_blue / app_green.
+nginx_lb_app_dir: "{{ app_dir | default('/opt/student-app') }}"
+nginx_lb_dir: "{{ nginx_lb_app_dir }}/lb"
+nginx_lb_repo_root: "{{ repo_root | default(playbook_dir ~ '/../../..') }}"
+
+# Environment of the lb scripts (see deploy/ec2/lb/bin/lib.sh).
+nginx_lb_environment:
+  APP_ENV_FILE: "{{ nginx_lb_app_dir }}/app.env"
+  MYSQL_ENV_FILE: "{{ nginx_lb_app_dir }}/mysql.env"
+  USE_LOCAL_MYSQL: "{{ use_local_mysql | default(true) | bool | string | lower }}"
+  LB_HTTP_PORT: "80"
+  READY_TIMEOUT: "120"
+  AWS_REGION: "{{ aws_region | default('us-east-1') }}"
+
+# ---- release (tasks_from: release)
+nginx_lb_strategy: bluegreen   # bluegreen | canary
+nginx_lb_image: "{{ app_image | default('') }}"
+# Extra env for the NEW color only - bad-release drills, e.g. "SRE_FAULT_ERROR_RATE=0.5" (CONVENTIONS §3).
+nginx_lb_slot_env: ""
+# blue/green
+nginx_lb_keep_old: true        # keep the old color running: rollback is an instant nginx reload
+nginx_lb_drain_seconds: 10
+# canary
+nginx_lb_canary_steps: "10 25 50 100"
+nginx_lb_canary_step_seconds: 30
+nginx_lb_canary_max_error_rate: "0.01"
+nginx_lb_canary_min_requests: 10
+# true for drills: an aborted canary (exit 2) is the expected, successful outcome.
+nginx_lb_canary_expect_abort: false
+# Upper bound for one release (async job; SSM sessions would otherwise idle out on long canaries).
+nginx_lb_release_timeout: 3600

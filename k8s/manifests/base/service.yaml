@@ -1,0 +1,20 @@
+# Stable virtual IP + DNS name (student-app.student-app.svc) in front of the Ready pods.
+# Only pods passing the readiness probe (/ready) are endpoints. The kind overlay turns this into a
+# NodePort, the EKS overlay puts an ALB Ingress in front of it (target-type ip = straight to pod IPs).
+apiVersion: v1
+kind: Service
+metadata:
+  name: student-app
+  labels:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: web
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: student-app
+    app.kubernetes.io/component: web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

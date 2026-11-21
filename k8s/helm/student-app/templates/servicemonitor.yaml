@@ -1,0 +1,40 @@
+{{- if .Values.serviceMonitor.enabled }}
+# Prometheus Operator scrape config — alternative to the PodMonitor shipped in
+# observability/k8s/kube-prometheus-stack-values.yaml (never enable both: double counting).
+# Targets the headless "<fullname>-metrics" Service (service.yaml), which Argo Rollouts never
+# re-points, so canary and stable pods are both scraped; pod labels are copied for dashboards.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "student-app.fullname" . }}
+  labels:
+    {{- include "student-app.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "student-app.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: metrics
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  podTargetLabels:
+    - rollouts-pod-template-hash
+    - app.kubernetes.io/version
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+      {{- with .Values.serviceMonitor.bearerTokenSecretKey }}
+      # /metrics protected by METRICS_TOKEN (CONVENTIONS §3).
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ $.Values.existingSecret }}
+          key: {{ . }}
+      {{- end }}
+{{- end }}

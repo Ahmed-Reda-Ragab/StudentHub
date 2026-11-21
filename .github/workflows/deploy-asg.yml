@@ -1,0 +1,530 @@
+# Release to the ASG fleet behind the ALB (stack 40 - infra/terraform/stacks/40-ec2-alb-asg).
+#
+#   instance-refresh  (scenario 44) put-parameter /student-app/<env>/deploy/<color>/IMAGE_URI, then
+#                     start-instance-refresh: new instances boot the new image, old ones are replaced
+#                     MinHealthy/MaxHealthy at a time (launch-before-terminate at 100/150).
+#   bluegreen-switch  (scenario 45) bring the IDLE color's ASG up on the new image, wait until its
+#                     target group is healthy, flip the listener 100% in one call, bake while watching
+#                     the alarms; ALARM => flip back (seconds, nothing to redeploy).
+#   canary-weights    (scenario 46) same preparation, then shift weights step by step (10/25/50/100),
+#                     checking the CloudWatch alarm between steps; ALARM => weights back to 100% stable.
+#
+# Why the workflow - not AWS - rolls back an instance refresh: the release lives in an SSM
+# parameter read at boot, not in the launch template. AWS auto rollback needs a desired
+# configuration and only restores the launch template, which never changed - replacement
+# instances would boot the bad image again. So AutoRollback=false, and on failure we put the
+# previous IMAGE_URI back and refresh again (deterministic).
+#
+# Migrations run once per release before any instance serves it (CONVENTIONS §2), on one
+# InService instance via SSM, with the NEW image - they must be expand/contract compatible.
+#
+# Variables (repo or `lab` environment): AWS_DEPLOY_ROLE_ARN, AWS_REGION, ECR_REPOSITORY, APP_URL,
+#   ALB_LISTENER_ARN (output listener_arn), TG_BLUE_ARN / TG_GREEN_ARN (output target_group_arns),
+#   ASG_NAME_BLUE / ASG_NAME_GREEN (default student-app-<env>-blue|green), optional
+#   CANARY_ALARM_NAME (default student-app-<env>-alb-5xx-ratio), REFRESH_ALARM_NAMES (space separated).
+# After a weight shift, copy the weights into stack 40 tfvars (blue_weight/green_weight) or the
+# next terraform apply reverts them (drift).
+name: Deploy ASG
+
+on:
+  workflow_dispatch:
+    inputs:
+      strategy:
+        description: "Release strategy"
+        type: choice
+        options: [instance-refresh, bluegreen-switch, canary-weights]
+        default: instance-refresh
+      image_tag:
+        description: "Image tag in ECR (git short SHA). Empty = this commit's short SHA."
+        type: string
+        default: ""
+      target_color:
+        description: "auto = live color for instance-refresh, idle color for bluegreen/canary"
+        type: choice
+        options: [auto, blue, green]
+        default: auto
+      canary_steps:
+        description: "canary-weights: traffic % for the new color, space separated"
+        type: string
+        default: "10 25 50 100"
+      step_seconds:
+        description: "canary-weights: seconds per step (the stack 40 alarms use 5-minute windows)"
+        type: string
+        default: "300"
+      bake_seconds:
+        description: "bluegreen-switch: seconds to watch the alarms after the switch"
+        type: string
+        default: "300"
+      min_healthy_percentage:
+        description: "instance refresh: 100 = never below desired capacity (MaxHealthy = min+50)"
+        type: string
+        default: "100"
+      instance_warmup:
+        description: "instance refresh: seconds before a new instance counts as healthy"
+        type: string
+        default: "120"
+      run_migrations:
+        description: "Run php artisan migrate once with the new image before releasing"
+        type: boolean
+        default: true
+      scale_down_old:
+        description: "bluegreen/canary: scale the old color to 0 after success (saves money, no instant rollback)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    name: ${{ inputs.strategy }} -> lab
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: lab
+      url: ${{ vars.APP_URL }}
+    concurrency:
+      group: deploy-lab-asg
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'student-app' }}
+      ENV_NAME: ${{ vars.ENV_NAME || 'lab' }}
+      APP_URL: ${{ vars.APP_URL }}
+      STRATEGY: ${{ inputs.strategy }}
+      TARGET_COLOR: ${{ inputs.target_color }}
+      CANARY_STEPS: ${{ inputs.canary_steps }}
+      STEP_SECONDS: ${{ inputs.step_seconds }}
+      BAKE_SECONDS: ${{ inputs.bake_seconds }}
+      MIN_HEALTHY: ${{ inputs.min_healthy_percentage }}
+      INSTANCE_WARMUP: ${{ inputs.instance_warmup }}
+      SCALE_DOWN_OLD: ${{ inputs.scale_down_old }}
+      ALB_LISTENER_ARN: ${{ vars.ALB_LISTENER_ARN }}
+      TG_BLUE_ARN: ${{ vars.TG_BLUE_ARN }}
+      TG_GREEN_ARN: ${{ vars.TG_GREEN_ARN }}
+      ASG_NAME_BLUE: ${{ vars.ASG_NAME_BLUE || format('student-app-{0}-blue', vars.ENV_NAME || 'lab') }}
+      ASG_NAME_GREEN: ${{ vars.ASG_NAME_GREEN || format('student-app-{0}-green', vars.ENV_NAME || 'lab') }}
+      CANARY_ALARM_NAME: ${{ vars.CANARY_ALARM_NAME || format('student-app-{0}-alb-5xx-ratio', vars.ENV_NAME || 'lab') }}
+      REFRESH_ALARM_NAMES: ${{ vars.REFRESH_ALARM_NAMES }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs
+        id: inputs
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          [[ "$CANARY_STEPS" =~ ^[0-9]{1,3}( [0-9]{1,3})*$ ]] || fail "canary_steps: space-separated percentages"
+          for n in "$STEP_SECONDS" "$BAKE_SECONDS" "$INSTANCE_WARMUP"; do [[ "$n" =~ ^[0-9]{1,5}$ ]] || fail "not a number: $n"; done
+          if ! [[ "$MIN_HEALTHY" =~ ^[0-9]{1,3}$ ]] || (( MIN_HEALTHY > 100 )); then fail "min_healthy_percentage: 0-100"; fi
+          tag="${IMAGE_TAG:-${GITHUB_SHA::7}}"
+          [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ && "$tag" != latest ]] || fail "invalid image tag: $tag"
+          if [[ "$STRATEGY" != instance-refresh ]]; then
+            [[ -n "$ALB_LISTENER_ARN" && -n "$TG_BLUE_ARN" && -n "$TG_GREEN_ARN" ]] \
+              || fail "$STRATEGY needs the ALB_LISTENER_ARN, TG_BLUE_ARN and TG_GREEN_ARN variables (stack 40 outputs)"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: deploy-asg-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Shared shell helpers for the steps below (steps do not share shell state).
+      - name: Write the helper library
+        run: |
+          cat > "$RUNNER_TEMP/asg-lib.sh" <<'LIBEOF'
+          set -euo pipefail
+          log()  { printf '[%s] %s\n' "$(date -u +%T)" "$*" >&2; }
+          die()  { echo "::error::$*"; exit 1; }
+          other() { if [[ "$1" == blue ]]; then echo green; else echo blue; fi; }
+          asg_of() { if [[ "$1" == blue ]]; then echo "$ASG_NAME_BLUE"; else echo "$ASG_NAME_GREEN"; fi; }
+          tg_of()  { if [[ "$1" == blue ]]; then echo "$TG_BLUE_ARN"; else echo "$TG_GREEN_ARN"; fi; }
+          param_of() { echo "/student-app/$ENV_NAME/deploy/$1/IMAGE_URI"; }
+          unhealthy_alarm_of() { echo "student-app-$ENV_NAME-$1-unhealthy-hosts"; }
+
+          weight_of() { # color -> its weight in the listener's weighted forward (0 if absent)
+              local w
+              w=$(aws elbv2 describe-listeners --listener-arns "$ALB_LISTENER_ARN" --output text --query \
+                  "Listeners[0].DefaultActions[?Type=='forward'] | [0].ForwardConfig.TargetGroups[?TargetGroupArn=='$(tg_of "$1")'] | [0].Weight")
+              if [[ "$w" =~ ^[0-9]+$ ]]; then echo "$w"; else echo 0; fi
+          }
+
+          set_weights() { # blue-weight green-weight; keeps every other listener setting (stickiness...)
+              local actions
+              actions=$(aws elbv2 describe-listeners --listener-arns "$ALB_LISTENER_ARN" \
+                          --query 'Listeners[0].DefaultActions' --output json \
+                  | jq -c --arg b "$TG_BLUE_ARN" --arg g "$TG_GREEN_ARN" --argjson wb "$1" --argjson wg "$2" '
+                      map(if .Type == "forward" then
+                            del(.TargetGroupArn)
+                            | .ForwardConfig.TargetGroups = [{TargetGroupArn: $b, Weight: $wb}, {TargetGroupArn: $g, Weight: $wg}]
+                          else . end)')
+              aws elbv2 modify-listener --listener-arn "$ALB_LISTENER_ARN" --default-actions "$actions" >/dev/null
+              log "listener weights now: blue=$1 green=$2"
+              echo "| $(date -u +%T) | blue=$1 green=$2 |" >> "$RUNNER_TEMP/weights.md"
+          }
+
+          route_to() { # color percent -> that color gets percent, the other the rest
+              if [[ "$1" == blue ]]; then set_weights "$2" $((100 - $2)); else set_weights $((100 - $2)) "$2"; fi
+          }
+
+          alarm_state() { # name -> OK | ALARM | INSUFFICIENT_DATA | None
+              aws cloudwatch describe-alarms --alarm-names "$1" --alarm-types MetricAlarm CompositeAlarm --output text \
+                  --query '[MetricAlarms[0].StateValue, CompositeAlarms[0].StateValue] | [?@ != null] | [0]'
+          }
+
+          watch_alarms() { # seconds name... -> returns 1 as soon as one alarm is in ALARM
+              local end=$((SECONDS + $1)) name state
+              shift
+              while :; do
+                  for name in "$@"; do
+                      state=$(alarm_state "$name")
+                      if [[ "$state" == ALARM ]]; then log "ALARM: $name"; echo "$name" > "$RUNNER_TEMP/tripped-alarm"; return 1; fi
+                  done
+                  (( SECONDS < end )) || return 0
+                  sleep 15
+              done
+          }
+
+          ok_alarms_json() { # name... -> JSON array of the alarms that are OK now (refresh gates must start OK)
+              local name state ok=()
+              for name in "$@"; do
+                  state=$(alarm_state "$name")
+                  if [[ "$state" == OK ]]; then ok+=("$name"); else echo "::warning::alarm $name is $state - not used as a gate" >&2; fi
+              done
+              if (( ${#ok[@]} == 0 )); then echo '[]'; else printf '%s\n' "${ok[@]}" | jq -R . | jq -sc .; fi
+          }
+
+          desired_of() { # asg -> desired capacity
+              local d
+              d=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$1" \
+                    --query 'AutoScalingGroups[0].DesiredCapacity' --output text)
+              [[ "$d" =~ ^[0-9]+$ ]] || die "ASG $1 not found (green needs green_enabled = true in stack 40)"
+              echo "$d"
+          }
+
+          healthy_count() { # color -> healthy targets in its target group
+              aws elbv2 describe-target-health --target-group-arn "$(tg_of "$1")" --output text \
+                  --query "length(TargetHealthDescriptions[?TargetHealth.State=='healthy'])"
+          }
+
+          wait_healthy() { # color expected [timeout]
+              local deadline=$((SECONDS + ${3:-900})) n
+              while :; do
+                  n=$(healthy_count "$1")
+                  log "$1 target group: $n/$2 healthy"
+                  (( n >= $2 )) && return 0
+                  (( SECONDS < deadline )) || return 1
+                  sleep 15
+              done
+          }
+
+          start_refresh() { # asg alarms-json -> refresh id
+              local prefs max=$((MIN_HEALTHY + 50))
+              (( max <= 200 )) || max=200
+              (( max >= 100 )) || max=100
+              prefs=$(jq -nc --argjson min "$MIN_HEALTHY" --argjson max "$max" --argjson warm "$INSTANCE_WARMUP" \
+                        --argjson alarms "$2" '
+                  {MinHealthyPercentage: $min, MaxHealthyPercentage: $max, InstanceWarmup: $warm,
+                   SkipMatching: false,   # the launch template did not change: every instance must be replaced
+                   AutoRollback: false}   # see the header: rollback = previous IMAGE_URI + new refresh
+                  + (if ($alarms | length) > 0 then {AlarmSpecification: {Alarms: $alarms}} else {} end)')
+              log "start-instance-refresh $1 $prefs"
+              aws autoscaling start-instance-refresh --auto-scaling-group-name "$1" --strategy Rolling \
+                  --preferences "$prefs" --query InstanceRefreshId --output text
+          }
+
+          wait_refresh() { # asg id -> final status on stdout
+              local st pct
+              while :; do
+                  read -r st pct <<<"$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name "$1" \
+                      --instance-refresh-ids "$2" --query 'InstanceRefreshes[0].[Status,PercentageComplete]' --output text)"
+                  log "refresh $2 on $1: $st (${pct}%)"
+                  case "$st" in Successful|Failed|Cancelled|RollbackSuccessful|RollbackFailed) echo "$st"; return 0 ;; esac
+                  sleep 20
+              done
+          }
+
+          put_image() { # color image
+              aws ssm put-parameter --name "$(param_of "$1")" --value "$2" --type String --overwrite >/dev/null
+              log "$(param_of "$1") = $2"
+          }
+
+          ssm_run() { # instance-id script-file -> runs it as root via Run Command, prints output, returns its exit code
+              local cid st inv
+              cid=$(jq -n --rawfile s "$2" --arg id "$1" --arg c "deploy-asg run $GITHUB_RUN_ID" '{
+                      DocumentName: "AWS-RunShellScript", InstanceIds: [$id], Comment: $c,
+                      Parameters: {commands: ($s | rtrimstr("\n") | split("\n")), executionTimeout: ["1200"]}}' \
+                  | aws ssm send-command --cli-input-json file:///dev/stdin --query Command.CommandId --output text)
+              log "SSM command $cid on $1"
+              while :; do
+                  sleep 10
+                  st=$(aws ssm get-command-invocation --command-id "$cid" --instance-id "$1" --query Status --output text 2>/dev/null || echo Pending)
+                  case "$st" in Pending|InProgress|Delayed) ;; *) break ;; esac
+              done
+              inv=$(aws ssm get-command-invocation --command-id "$cid" --instance-id "$1" --output json)
+              jq -r '.StandardOutputContent, "----- stderr", .StandardErrorContent' <<<"$inv"
+              [[ "$st" == Success ]]
+          }
+          LIBEOF
+          bash -n "$RUNNER_TEMP/asg-lib.sh"
+
+      - name: Resolve the image in ECR
+        id: image
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids imageTag="$TAG" >/dev/null \
+            || { echo "::error::$ECR_REPOSITORY:$TAG is not in ECR - did CI push it?"; exit 1; }
+          # repo:tag exactly as CONVENTIONS §4 / the ASG user data expect (ECR tags are IMMUTABLE).
+          echo "uri=$account.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Plan (live color, target color, current state)
+        id: plan
+        run: |
+          source "$RUNNER_TEMP/asg-lib.sh"
+          if [[ -n "$ALB_LISTENER_ARN" && -n "$TG_BLUE_ARN" && -n "$TG_GREEN_ARN" ]]; then
+            wb=$(weight_of blue); wg=$(weight_of green)
+          else
+            wb=100; wg=0   # instance-refresh without listener variables: single (blue) fleet
+          fi
+          live=blue; (( wg > wb )) && live=green
+          if [[ "$STRATEGY" == instance-refresh ]]; then
+            target="${TARGET_COLOR/auto/$live}"
+          else
+            target="${TARGET_COLOR/auto/$(other "$live")}"
+            [[ "$target" != "$live" ]] || die "$target is already live (blue=$wb green=$wg) - target the idle color"
+          fi
+          {
+            echo "live=$live"
+            echo "target=$target"
+            echo "weights=blue=$wb green=$wg"
+            echo "previous_image=$(aws ssm get-parameter --name "$(param_of "$target")" --query Parameter.Value --output text)"
+          } >> "$GITHUB_OUTPUT"
+          echo "| time (UTC) | listener |" > "$RUNNER_TEMP/weights.md"
+          echo "|---|---|" >> "$RUNNER_TEMP/weights.md"
+          echo "| start | blue=$wb green=$wg |" >> "$RUNNER_TEMP/weights.md"
+          log "live=$live target=$target asg=$(asg_of "$target") weights blue=$wb green=$wg"
+
+      - name: Start the traffic probe
+        if: env.APP_URL != ''
+        run: |
+          # canary-weights: real-page traffic so the ALB 5xx alarm has data (the lab has no users).
+          url="$APP_URL/ready" interval=0.2
+          if [[ "$STRATEGY" == canary-weights ]]; then url="$APP_URL/login" interval=0.05; fi
+          STOP_FILE="$RUNNER_TEMP/probe.stop" OUT="$RUNNER_TEMP/probe.txt" \
+            nohup bash deploy/scripts/probe.sh "$url" 0 "$interval" > "$RUNNER_TEMP/probe.log" 2>&1 &
+
+      - name: Run migrations once (new image, one instance, SSM)
+        if: inputs.run_migrations
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
+          LIVE: ${{ steps.plan.outputs.live }}
+          TARGET: ${{ steps.plan.outputs.target }}
+        run: |
+          source "$RUNNER_TEMP/asg-lib.sh"
+          iid=None
+          for color in "$LIVE" "$TARGET"; do
+            iid=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$(asg_of "$color")" --output text \
+                    --query "AutoScalingGroups[0].Instances[?LifecycleState=='InService'] | [0].InstanceId")
+            [[ "$iid" == None ]] || break
+          done
+          if [[ "$iid" == None ]]; then
+            echo "::warning::no InService instance to run migrations on - skipped"
+            exit 0
+          fi
+          {
+            printf 'IMAGE=%q\nAWS_REGION=%q\n' "$IMAGE_URI" "$AWS_REGION"
+            cat <<'MIGRATE'
+          set -euo pipefail
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${IMAGE%%/*}" >/dev/null
+          docker run --rm --env-file /opt/student-app/app.env "$IMAGE" php artisan migrate --force
+          MIGRATE
+          } > "$RUNNER_TEMP/migrate.sh"
+          ssm_run "$iid" "$RUNNER_TEMP/migrate.sh" || die "migrations failed on $iid - nothing was released"
+
+      - name: "Release: instance refresh"
+        id: refresh
+        if: inputs.strategy == 'instance-refresh'
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
+          TARGET: ${{ steps.plan.outputs.target }}
+          PREVIOUS: ${{ steps.plan.outputs.previous_image }}
+        run: |
+          source "$RUNNER_TEMP/asg-lib.sh"
+          asg=$(asg_of "$TARGET")
+          if [[ "$PREVIOUS" == "$IMAGE_URI" ]]; then
+            echo "::notice::$(param_of "$TARGET") already points at $IMAGE_URI - nothing to release"
+            echo "outcome=unchanged" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          desired=$(desired_of "$asg")
+          put_image "$TARGET" "$IMAGE_URI"
+          if (( desired == 0 )); then
+            echo "::notice::$asg has no instances; the next ones will boot $IMAGE_URI"
+            echo "outcome=released" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -n "$REFRESH_ALARM_NAMES" ]]; then read -ra gates <<<"$REFRESH_ALARM_NAMES"
+          else gates=("student-app-$ENV_NAME-alb-5xx-ratio" "$(unhealthy_alarm_of "$TARGET")"); fi
+          if ! id=$(start_refresh "$asg" "$(ok_alarms_json "${gates[@]}")"); then
+            put_image "$TARGET" "$PREVIOUS"
+            die "could not start the instance refresh (another one in progress?) - pointer restored"
+          fi
+          echo "refresh_id=$id" >> "$GITHUB_OUTPUT"
+          status=$(wait_refresh "$asg" "$id")
+          if [[ "$status" == Successful ]]; then
+            echo "outcome=released" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          log "refresh $status - rolling back to $PREVIOUS"
+          put_image "$TARGET" "$PREVIOUS"
+          # no alarm gate: the rollback must finish even while the alarm that stopped us is firing
+          rid=$(start_refresh "$asg" '[]')
+          rstatus=$(wait_refresh "$asg" "$rid")
+          echo "outcome=rolled-back" >> "$GITHUB_OUTPUT"
+          die "instance refresh $status; rolled back to $PREVIOUS (rollback refresh: $rstatus)"
+
+      - name: "Prepare the idle color"
+        if: inputs.strategy != 'instance-refresh'
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
+          LIVE: ${{ steps.plan.outputs.live }}
+          TARGET: ${{ steps.plan.outputs.target }}
+          PREVIOUS: ${{ steps.plan.outputs.previous_image }}
+        run: |
+          source "$RUNNER_TEMP/asg-lib.sh"
+          asg_t=$(asg_of "$TARGET")
+          desired_t=$(desired_of "$asg_t")
+          desired_l=$(desired_of "$(asg_of "$LIVE")")
+          put_image "$TARGET" "$IMAGE_URI"
+          if (( desired_t == 0 )); then
+            want=$(( desired_l > 0 ? desired_l : 1 ))
+            # boots fresh instances that read the new IMAGE_URI (fails if the ASG max_size < want)
+            aws autoscaling set-desired-capacity --auto-scaling-group-name "$asg_t" --desired-capacity "$want" \
+              || { put_image "$TARGET" "$PREVIOUS"; die "cannot scale $asg_t to $want"; }
+            log "scaled $asg_t 0 -> $want"
+          else
+            want=$desired_t
+            if ! id=$(start_refresh "$asg_t" "$(ok_alarms_json "$(unhealthy_alarm_of "$TARGET")")"); then
+              put_image "$TARGET" "$PREVIOUS"; die "could not start the refresh of $asg_t"
+            fi
+            status=$(wait_refresh "$asg_t" "$id")
+            [[ "$status" == Successful ]] || { put_image "$TARGET" "$PREVIOUS"; die "refresh of idle $asg_t: $status - live color untouched"; }
+          fi
+          wait_healthy "$TARGET" "$want" 900 || die "$TARGET never reached $want healthy targets - live color untouched"
+
+      - name: "Release: blue/green switch"
+        id: switch
+        if: inputs.strategy == 'bluegreen-switch'
+        env:
+          LIVE: ${{ steps.plan.outputs.live }}
+          TARGET: ${{ steps.plan.outputs.target }}
+        run: |
+          source "$RUNNER_TEMP/asg-lib.sh"
+          route_to "$TARGET" 100
+          if [[ -n "$APP_URL" ]]; then
+            sleep 5
+            seen=$(for _ in $(seq 1 10); do curl -fsS -m 5 "$APP_URL/ready" | jq -r .color; done | sort | uniq -c | tr '\n' ' ')
+            log "colors answering after the switch: $seen"
+          fi
+          if ! watch_alarms "$BAKE_SECONDS" "$CANARY_ALARM_NAME" "$(unhealthy_alarm_of "$TARGET")"; then
+            route_to "$LIVE" 100
+            echo "outcome=rolled-back" >> "$GITHUB_OUTPUT"
+            die "alarm $(cat "$RUNNER_TEMP/tripped-alarm") during the bake - traffic switched back to $LIVE"
+          fi
+          echo "outcome=released" >> "$GITHUB_OUTPUT"
+
+      - name: "Release: canary weights"
+        id: canary
+        if: inputs.strategy == 'canary-weights'
+        env:
+          LIVE: ${{ steps.plan.outputs.live }}
+          TARGET: ${{ steps.plan.outputs.target }}
+        run: |
+          source "$RUNNER_TEMP/asg-lib.sh"
+          for pct in $CANARY_STEPS; do
+            (( pct <= 100 )) || pct=100
+            route_to "$TARGET" "$pct"
+            if ! watch_alarms "$STEP_SECONDS" "$CANARY_ALARM_NAME" "$(unhealthy_alarm_of "$TARGET")"; then
+              route_to "$LIVE" 100
+              echo "outcome=aborted" >> "$GITHUB_OUTPUT"
+              die "canary aborted at $pct%: alarm $(cat "$RUNNER_TEMP/tripped-alarm") - 100% back on $LIVE"
+            fi
+            log "step $pct% healthy"
+            (( pct < 100 )) || break
+          done
+          # steps that never reach 100 leave a deliberate split (e.g. "10 25" = long-running canary)
+          echo "outcome=released" >> "$GITHUB_OUTPUT"
+
+      - name: Scale the old color down
+        if: inputs.scale_down_old && inputs.strategy != 'instance-refresh'
+        env:
+          LIVE: ${{ steps.plan.outputs.live }}
+        run: |
+          source "$RUNNER_TEMP/asg-lib.sh"
+          # min-size too: Terraform's min_size=1 would otherwise keep one instance alive (drift on next apply).
+          aws autoscaling update-auto-scaling-group --auto-scaling-group-name "$(asg_of "$LIVE")" --min-size 0 --desired-capacity 0
+          log "$(asg_of "$LIVE") scaled to 0 - rollback now needs a scale-up first"
+
+      - name: Stop the traffic probe
+        if: always() && env.APP_URL != ''
+        run: |
+          touch "$RUNNER_TEMP/probe.stop"
+          for _ in $(seq 1 30); do [[ -s "$RUNNER_TEMP/probe.txt" ]] && break; sleep 1; done
+          cat "$RUNNER_TEMP/probe.txt" 2>/dev/null || true
+
+      - name: Smoke test APP_URL
+        id: smoke
+        if: success() && env.APP_URL != ''
+        run: |
+          set -euo pipefail
+          body=$(curl -fsS -m 5 --retry 12 --retry-delay 5 --retry-all-errors "$APP_URL/ready")
+          echo "$body" | jq .
+          [[ "$(jq -r .status <<<"$body")" == ready ]]
+          echo "answer=$(jq -r '"\(.version) (\(.color))"' <<<"$body")" >> "$GITHUB_OUTPUT"
+
+      - name: Job summary
+        if: always()
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
+          LIVE: ${{ steps.plan.outputs.live }}
+          TARGET: ${{ steps.plan.outputs.target }}
+          PREVIOUS: ${{ steps.plan.outputs.previous_image }}
+          OUTCOME: ${{ steps.refresh.outputs.outcome || steps.switch.outputs.outcome || steps.canary.outputs.outcome }}
+          ANSWER: ${{ steps.smoke.outputs.answer }}
+        run: |
+          {
+            echo "### ASG release - \`$STRATEGY\`"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`${IMAGE_URI:-n/a}\` |"
+            echo "| Colors | live before: **${LIVE:-?}**, target: **${TARGET:-?}** |"
+            echo "| Previous release pointer | \`${PREVIOUS:-?}\` |"
+            echo "| Outcome | **${OUTCOME:-failed before release}** |"
+            echo "| APP_URL answers | \`${ANSWER:-?}\` |"
+            if [[ -s "$RUNNER_TEMP/tripped-alarm" ]]; then echo "| Tripped alarm | \`$(cat "$RUNNER_TEMP/tripped-alarm")\` |"; fi
+            if [[ -s "$RUNNER_TEMP/weights.md" && "$STRATEGY" != instance-refresh ]]; then
+              echo; echo "**Listener weights**"; echo; cat "$RUNNER_TEMP/weights.md"
+              echo; echo "> Copy the final weights into stack 40 tfvars (blue_weight / green_weight) or the next apply reverts them."
+            fi
+            if [[ -s "$RUNNER_TEMP/probe.txt" ]]; then
+              echo; echo "**Availability during the release**"; echo '```text'; cat "$RUNNER_TEMP/probe.txt"; echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

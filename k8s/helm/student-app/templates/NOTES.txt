@@ -1,0 +1,31 @@
+student-app {{ include "student-app.imageTag" . }} → namespace {{ .Release.Namespace }} (release {{ .Release.Name }}, revision {{ .Release.Revision }})
+{{- $fullname := include "student-app.fullname" . }}
+
+Workload : {{ if .Values.rollout.enabled }}Argo Rollout "{{ $fullname }}" ({{ .Values.rollout.strategy }}){{ else }}Deployment "{{ $fullname }}" (RollingUpdate maxSurge {{ .Values.rollingUpdate.maxSurge }} / maxUnavailable {{ .Values.rollingUpdate.maxUnavailable }}){{ end }}
+Secret   : {{ .Values.existingSecret }}{{ if .Values.externalSecrets.enabled }} (External Secrets ← SSM {{ .Values.externalSecrets.ssmPath }}){{ else }} (must exist before install){{ end }}
+
+Check it:
+{{- if eq .Values.service.type "NodePort" }}
+  curl -s http://localhost:8088/ready        # kind: NodePort {{ .Values.service.nodePort }} → localhost:8088
+{{- else if .Values.ingress.enabled }}
+  kubectl -n {{ .Release.Namespace }} get ingress {{ $fullname }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+  curl -s http://<that-hostname>/ready
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullname }} 8080:{{ .Values.service.port }}
+  curl -s http://localhost:8080/ready
+{{- end }}
+{{- if .Values.rollout.enabled }}
+
+Progressive delivery (kubectl argo rollouts plugin):
+  kubectl argo rollouts get rollout {{ $fullname }} -n {{ .Release.Namespace }} --watch
+  kubectl argo rollouts promote {{ $fullname }} -n {{ .Release.Namespace }}      # next step / switch
+  kubectl argo rollouts abort   {{ $fullname }} -n {{ .Release.Namespace }}      # back to stable now
+  kubectl argo rollouts undo    {{ $fullname }} -n {{ .Release.Namespace }}      # previous revision
+{{- else }}
+
+Rollout status:
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ $fullname }}
+{{- end }}
+
+Simulate a bad release (scenario 68):
+  helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} --reuse-values --set extraEnv.SRE_FAULT_ERROR_RATE=0.5

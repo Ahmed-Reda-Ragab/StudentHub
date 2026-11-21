@@ -1,0 +1,33 @@
+# cp terraform.tfvars.example terraform.tfvars   (terraform.tfvars is not committed)
+
+region   = "us-east-1"
+scenario = "60"
+
+kubernetes_version = "1.36"
+
+# Lock the public API endpoint to your IP: curl -s https://checkip.amazonaws.com
+cluster_endpoint_public_access_cidrs = ["203.0.113.10/32"]
+
+# ---- nodes (scenario 62: Spot)
+# node_instance_types = ["t3.medium", "t3a.medium"]
+# node_capacity_type  = "SPOT"
+# node_desired_size   = 2
+
+# ---- extra cluster admins, e.g. the GitHub deploy role (bootstrap output github_deploy_role_arn)
+# cluster_admin_principal_arns = ["arn:aws:iam::<ACCOUNT_ID>:role/student-app-gha-deploy"]
+
+# ---- second apply: Helm add-ons
+# install_addons = true
+# addons = {
+#   aws_load_balancer_controller = true
+#   external_secrets             = true
+#   argo_rollouts                = true
+#   argo_cd                      = false   # heavy on 2x t3.medium
+#   kube_prometheus_stack        = false   # heavy on 2x t3.medium
+# }
+
+# ---- Karpenter (scenario 6A)
+# enable_karpenter = true
+
+# ---- after the Ingress has an address
+# app_url = "http://k8s-studenta-xxxxxxxx.us-east-1.elb.amazonaws.com"

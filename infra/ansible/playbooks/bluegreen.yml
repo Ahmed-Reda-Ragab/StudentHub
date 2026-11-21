@@ -1,0 +1,33 @@
+---
+# Blue/Green on one host (scenario 23): the new image starts on the idle color, is smoke-tested,
+# then nginx switches 100% of traffic in one graceful reload. The old color keeps running, so
+# rollback.yml is instant. First run on a host = bin/init.sh (blue).
+#
+#   ansible-playbook playbooks/bluegreen.yml -e app_image=<ecr>/student-app:<sha>
+#   ansible-playbook playbooks/bluegreen.yml -e app_image=... -e nginx_lb_keep_old=false
+#   ansible-playbook playbooks/bluegreen.yml -e app_image=... -e nginx_lb_slot_env=SRE_FAULT_UNHEALTHY=true   # drill
+- name: Blue/green release on the single-host stack
+  hosts: "{{ target_hosts | default('role_app:&standalone') }}"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Copy the compose file and deploy scripts
+      ansible.builtin.include_role:
+        name: app
+        tasks_from: files
+
+    - name: Render app.env and mysql.env
+      ansible.builtin.include_role:
+        name: app
+        tasks_from: env
+
+    - name: Sync the lb stack
+      ansible.builtin.include_role:
+        name: nginx_lb
+
+    - name: Release with bin/bluegreen.sh
+      ansible.builtin.include_role:
+        name: nginx_lb
+        tasks_from: release
+      vars:
+        nginx_lb_strategy: bluegreen

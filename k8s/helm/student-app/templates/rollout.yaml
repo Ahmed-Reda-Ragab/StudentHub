@@ -1,0 +1,105 @@
+{{- if .Values.rollout.enabled }}
+{{- $fullname := include "student-app.fullname" . }}
+{{- $strategy := .Values.rollout.strategy }}
+{{- if not (has $strategy (list "canary" "blueGreen")) }}
+{{- fail (printf "rollout.strategy must be canary or blueGreen, got %q" $strategy) }}
+{{- end }}
+{{- $alb := and (eq $strategy "canary") .Values.rollout.canary.trafficRouting.alb.enabled }}
+{{- if and $alb (not (and .Values.ingress.enabled (eq .Values.ingress.className "alb"))) }}
+{{- fail "rollout.canary.trafficRouting.alb.enabled needs ingress.enabled=true and ingress.className=alb" }}
+{{- end }}
+# Progressive delivery with Argo Rollouts (scenarios 67–68). Same pod template as deployment.yaml.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "student-app.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  # A new revision that never becomes Ready (boot failure, unhealthy release) is aborted
+  # automatically instead of hanging; traffic stays on stable.
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds }}
+  progressDeadlineAbort: true
+  selector:
+    matchLabels:
+      {{- include "student-app.selectorLabels" . | nindent 6 }}
+  template:
+    {{- include "student-app.podTemplate" (dict "root" . "hashLabel" "rollouts-pod-template-hash") | nindent 4 }}
+  strategy:
+    {{- if eq $strategy "canary" }}
+    {{- with .Values.rollout.canary }}
+    canary:
+      maxSurge: {{ .maxSurge }}
+      maxUnavailable: {{ .maxUnavailable }}
+      {{- if $alb }}
+      # ALB weighted target groups: exact percentages, independent of replica counts.
+      # Argo Rollouts pins the Services' selectors to the stable/canary ReplicaSets and writes the
+      # alb.ingress.kubernetes.io/actions.<stable> annotation on the Ingress at every setWeight.
+      stableService: {{ $fullname }}
+      canaryService: {{ $fullname }}-canary
+      abortScaleDownDelaySeconds: {{ .abortScaleDownDelaySeconds }}
+      trafficRouting:
+        alb:
+          ingress: {{ $fullname }}
+          servicePort: {{ $.Values.service.port }}
+      {{- end }}
+      steps:
+        {{- toYaml .steps | nindent 8 }}
+      {{- if .analysis.enabled }}
+      # Background analysis: runs from startingStep until promotion; one failed verdict aborts the
+      # rollout (canary scaled down, 100% back to stable) — no human in the loop.
+      analysis:
+        startingStep: {{ .analysis.startingStep }}
+        templates:
+          - templateName: {{ $fullname }}-error-rate
+        args:
+          - name: namespace
+            value: {{ $.Release.Namespace | quote }}
+          - name: canary-hash
+            valueFrom:
+              podTemplateHashValue: Latest
+      {{- end }}
+    {{- end }}
+    {{- else }}
+    {{- with .Values.rollout.blueGreen }}
+    blueGreen:
+      # active = what users get (the Service/Ingress target), preview = the new version, testable
+      # through "<fullname>-preview" before the switch.
+      activeService: {{ $fullname }}
+      previewService: {{ $fullname }}-preview
+      autoPromotionEnabled: {{ .autoPromotionEnabled }}
+      scaleDownDelaySeconds: {{ .scaleDownDelaySeconds }}
+      {{- with .previewReplicaCount }}
+      previewReplicaCount: {{ . }}
+      {{- end }}
+      {{- if .prePromotionAnalysis.enabled }}
+      prePromotionAnalysis:
+        templates:
+          - templateName: {{ $fullname }}-ready
+        args:
+          - name: service
+            value: {{ $fullname }}-preview
+          - name: namespace
+            value: {{ $.Release.Namespace | quote }}
+      {{- end }}
+      {{- if .postPromotionAnalysis.enabled }}
+      # After the switch: if the new active pods burn errors, roll back to the still-running blue pods.
+      postPromotionAnalysis:
+        templates:
+          - templateName: {{ $fullname }}-error-rate
+        args:
+          - name: namespace
+            value: {{ $.Release.Namespace | quote }}
+          - name: canary-hash
+            valueFrom:
+              podTemplateHashValue: Latest
+      {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,13 @@
+# {{ ansible_managed }} (role mysql_backup)
+# Next run:  systemctl list-timers {{ mysql_backup_unit }}.timer
+[Unit]
+Description=Daily student-app MySQL backup
+
+[Timer]
+OnCalendar={{ mysql_backup_on_calendar }}
+# Missed while the instance was stopped? Run once at the next boot.
+Persistent=true
+Unit={{ mysql_backup_unit }}.service
+
+[Install]
+WantedBy=timers.target

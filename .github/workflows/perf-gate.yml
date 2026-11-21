@@ -1,0 +1,252 @@
+# Performance gate — scenario 74. Runs a k6 script from loadtest/k6 against a DEPLOYED
+# environment; the k6 thresholds are the SLOs (CONVENTIONS §5), so a breach fails the job.
+#
+#   Manual:   Actions → "Perf gate (k6)" → Run workflow (base_url, script, vus, duration, p95_ms)
+#   From a deploy workflow, after the new release is live:
+#     perf-gate:
+#       needs: deploy
+#       uses: ./.github/workflows/perf-gate.yml
+#       with: { base_url: "http://${{ needs.deploy.outputs.alb_dns }}", script: load.js, vus: "20", duration: 5m, p95_ms: "300" }
+#       secrets: inherit                      # or: SRE_LAB_TOKEN: ${{ secrets.SRE_LAB_TOKEN }}
+#
+# Prerequisites on the target: LoadTestSeeder users (loadtest1..N@example.com) and, for
+# /sre-lab scripts, SRE_LAB_ENABLED=true. The SRE_LAB_TOKEN secret is sent as X-Lab-Token.
+# Artifacts: HTML report (k6 web dashboard export), summary.json (--summary-export), console output.
+name: Perf gate (k6)
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Target base URL (ALB DNS, ingress, http://host:8080) — never production"
+        required: true
+        type: string
+      script:
+        description: "Script in loadtest/k6"
+        required: true
+        default: load.js
+        type: choice
+        options:
+          - load.js
+          - smoke.js
+          - stress.js
+          - spike.js
+          - soak.js
+          - breakpoint.js
+          - user-journey.js
+          - autoscale-cpu.js
+          - canary-watch.js
+          - error-budget-burn.js
+      vus:
+        description: "VUS (virtual users; baseline for stress/spike)"
+        required: false
+        default: "10"
+        type: string
+      duration:
+        description: "DURATION (45s, 5m, 1h...)"
+        required: false
+        default: 5m
+        type: string
+      p95_ms:
+        description: "P95_MS threshold in ms (real SLO = 300)"
+        required: false
+        default: "300"
+        type: string
+      loadtest_users:
+        description: "LOADTEST_USERS seeded on the target"
+        required: false
+        default: "20"
+        type: string
+      k6_env:
+        description: "Extra k6 env, space-separated KEY=value (e.g. RATE=6 CPU_MS=200 for autoscale-cpu.js)"
+        required: false
+        default: ""
+        type: string
+  workflow_call:
+    inputs:
+      base_url:
+        required: true
+        type: string
+      script:
+        required: false
+        default: load.js
+        type: string
+      vus:
+        required: false
+        default: "10"
+        type: string
+      duration:
+        required: false
+        default: 5m
+        type: string
+      p95_ms:
+        required: false
+        default: "300"
+        type: string
+      loadtest_users:
+        required: false
+        default: "20"
+        type: string
+      k6_env:
+        required: false
+        default: ""
+        type: string
+    secrets:
+      SRE_LAB_TOKEN:
+        required: false
+    outputs:
+      k6_exit_code:
+        description: "0 = SLOs met, 99 = thresholds crossed, other = script/infra error"
+        value: ${{ jobs.k6.outputs.exit_code }}
+
+permissions:
+  contents: read
+
+# Never run two load tests against the same environment at once: they would measure each other.
+concurrency:
+  group: perf-gate-${{ inputs.base_url }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  k6:
+    name: k6 ${{ inputs.script }} → ${{ inputs.base_url }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      exit_code: ${{ steps.run.outputs.exit_code }}
+    env:
+      # Inputs go through env (never ${{ }} inside run:) — no script injection.
+      BASE_URL: ${{ inputs.base_url }}
+      SCRIPT: ${{ inputs.script }}
+      VUS: ${{ inputs.vus }}
+      DURATION: ${{ inputs.duration }}
+      P95_MS: ${{ inputs.p95_ms }}
+      LOADTEST_USERS: ${{ inputs.loadtest_users }}
+      K6_EXTRA_ENV: ${{ inputs.k6_env }}
+      # k6 copies the process environment into __ENV, so the token never appears on a command line.
+      LAB_TOKEN: ${{ secrets.SRE_LAB_TOKEN }}
+      RESULTS: loadtest/results
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: grafana/setup-k6-action@v1
+        with:
+          k6-version: "2.4.0"
+
+      - name: Validate inputs
+        run: |
+          if [[ ! "$SCRIPT" =~ ^[a-z0-9-]+\.js$ ]] || [[ ! -f "loadtest/k6/$SCRIPT" ]]; then
+            echo "::error::script must be a file name from loadtest/k6 (got '$SCRIPT')"; exit 1
+          fi
+          if [[ ! "$BASE_URL" =~ ^https?:// ]]; then
+            echo "::error::base_url must start with http:// or https://"; exit 1
+          fi
+          for v in "$VUS" "$P95_MS" "$LOADTEST_USERS"; do
+            [[ "$v" =~ ^[0-9]+$ ]] || { echo "::error::vus / p95_ms / loadtest_users must be integers"; exit 1; }
+          done
+          [[ "$DURATION" =~ ^[0-9]+(ms|s|m|h)?([0-9]+(ms|s|m|h))*$ ]] || { echo "::error::bad duration '$DURATION'"; exit 1; }
+          read -ra pairs <<<"$K6_EXTRA_ENV"
+          for pair in "${pairs[@]}"; do
+            [[ "$pair" =~ ^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/-]*$ ]] || { echo "::error::k6_env entry '$pair' must be KEY=value"; exit 1; }
+          done
+
+      - name: Target is ready
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS --max-time 5 "${BASE_URL%/}/ready"; then echo; exit 0; fi
+            echo "attempt $i: not ready yet"; sleep 6
+          done
+          echo "::error::${BASE_URL%/}/ready did not answer 200"; exit 1
+
+      - name: Run k6 (thresholds = SLOs)
+        id: run
+        env:
+          K6_WEB_DASHBOARD: "true"
+          K6_WEB_DASHBOARD_PORT: "-1" # no HTTP server in CI, still writes the HTML report
+          K6_WEB_DASHBOARD_EXPORT: loadtest/results/report.html
+        run: |
+          mkdir -p "$RESULTS"
+          extra=()
+          read -ra pairs <<<"$K6_EXTRA_ENV"
+          for pair in "${pairs[@]}"; do extra+=(-e "$pair"); done
+          set +e
+          k6 run "${extra[@]}" \
+            -e BASE_URL="$BASE_URL" -e VUS="$VUS" -e DURATION="$DURATION" \
+            -e P95_MS="$P95_MS" -e LOADTEST_USERS="$LOADTEST_USERS" \
+            -e TEST_ID="perf-gate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --summary-export "$RESULTS/summary.json" \
+            "loadtest/k6/$SCRIPT" 2>&1 | tee "$RESULTS/k6-output.txt"
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          echo "k6 exit code: $code"
+
+      - name: Job summary
+        if: always()
+        env:
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+        run: |
+          python3 - "$RESULTS/summary.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, os, sys
+
+          code = os.environ.get("EXIT_CODE") or "n/a"
+          verdict = {"0": "PASS: all SLO thresholds met", "99": "FAIL: SLO thresholds crossed"}.get(code, f"ERROR: k6 exited with {code}")
+          print(f"## k6 perf gate: `{os.environ['SCRIPT']}` → {os.environ['BASE_URL']}\n")
+          print(f"**{verdict}**  ·  VUS={os.environ['VUS']} · DURATION={os.environ['DURATION']} · P95_MS={os.environ['P95_MS']}\n")
+          try:
+              m = json.load(open(sys.argv[1]))["metrics"]
+          except Exception as e:  # k6 crashed before writing the summary
+              print(f"_No summary.json ({e}); see the k6-output artifact._")
+              sys.exit(0)
+
+          def num(name, key, fmt="{:.2f}", scale=1.0):
+              v = m.get(name, {}).get(key)
+              return fmt.format(v * scale) if isinstance(v, (int, float)) else "n/a"
+
+          F0, F2, PCT2, PCT3 = "{:.0f}", "{:.2f}", "{:.2f}%", "{:.3f}%"
+          ok_lat = "http_req_duration{expected_response:true}"
+          lat = ok_lat if ok_lat in m else "http_req_duration"
+          print("| Metric | Value |\n|---|---|")
+          print(f"| Requests | {num('http_reqs', 'count', F0)} ({num('http_reqs', 'rate')} req/s) |")
+          print(f"| Error rate (http_req_failed) | {num('http_req_failed', 'value', PCT3, 100)} (SLO budget 0.5%) |")
+          print(f"| p50 / p95 / p99 ({'successful' if lat == ok_lat else 'all'} responses) | "
+                f"{num(lat, 'med', F0)} / {num(lat, 'p(95)', F0)} / {num(lat, 'p(99)', F0)} ms |")
+          print(f"| Checks passed | {num('checks', 'value', PCT2, 100)} |")
+          print(f"| Iterations | {num('iterations', 'count', F0)} |\n")
+
+          # In --summary-export JSON a threshold value of true means "crossed" (k6 writes !ok).
+          rows = []
+          for name, metric in sorted(m.items()):
+              for expr, crossed in (metric.get("thresholds") or {}).items():
+                  if expr in ("max>=0", "count>=0", "rate>=0"):
+                      continue  # display-only thresholds
+                  rows.append(f"| {'❌' if crossed else '✅'} | `{name}` | `{expr}` |")
+          if rows:
+              print("### Thresholds (SLOs)\n\n| | Metric | Threshold |\n|---|---|---|")
+              print("\n".join(rows))
+          PY
+
+      - name: Upload report + summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-${{ github.run_id }}-${{ github.run_attempt }}
+          path: loadtest/results/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail on SLO breach
+        if: steps.run.outputs.exit_code != '0'
+        env:
+          EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+        run: |
+          if [[ "$EXIT_CODE" == "99" ]]; then
+            echo "::error::k6 thresholds (SLOs) were crossed — see the job summary and the HTML report artifact"
+          else
+            echo "::error::k6 failed with exit code ${EXIT_CODE:-unknown} (script or infrastructure error)"
+          fi
+          exit 1

@@ -1,0 +1,103 @@
+# Promotion lab -> production of the SAME image (scenario 34). Build once, promote the bytes:
+#
+#   deploy-lab ──(smoke ok)──► deploy-production ──► tag-release
+#   environment: lab           environment: production         git tag release-<date>-<sha>
+#   (no approval)              (required reviewers + wait timer = the change-approval gate)
+#
+# Nothing is rebuilt between environments. deploy-lab resolves the tag to its sha256 digest in
+# ECR; deploy-production refuses to run unless the tag still resolves to that exact digest, and
+# both hosts run <repo>:<tag>@<digest>. (Across accounts, ECR replication keeps the digest:
+# content-addressed, identical bytes everywhere.)
+#
+# Both deploys reuse deploy-ec2-ssm.yml (workflow_call), so production is deployed by the same,
+# already-exercised code path as lab. Per-environment values come from GitHub *environment*
+# variables: EC2_INSTANCE_ID, APP_URL, ENV_NAME (prod SSM prefix), AWS_DEPLOY_ROLE_ARN.
+# Setup: Settings -> Environments -> production -> Required reviewers (+ wait timer), and allow
+# only protected branches to deploy to it.
+name: Release promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag already in ECR (git short SHA) to promote"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-lab:
+    uses: ./.github/workflows/deploy-ec2-ssm.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      environment: lab
+      image_tag: ${{ inputs.image_tag }}
+
+  deploy-production:
+    needs: deploy-lab
+    uses: ./.github/workflows/deploy-ec2-ssm.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      environment: production
+      image_tag: ${{ inputs.image_tag }}
+      # the exact bytes that passed lab, or nothing
+      expected_digest: ${{ needs.deploy-lab.outputs.image_digest }}
+
+  tag-release:
+    name: Tag the released commit
+    needs: [deploy-lab, deploy-production]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the tag
+    env:
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      IMAGE_URI: ${{ needs.deploy-production.outputs.image_uri }}
+      DIGEST: ${{ needs.deploy-production.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # the image tag is a short SHA: resolve it against the full history
+
+      - name: Create and push the release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if ! sha=$(git rev-parse --verify --quiet "${IMAGE_TAG}^{commit}"); then
+            echo "::error::image tag $IMAGE_TAG is not a commit in this repository - cannot tag the release"
+            exit 1
+          fi
+          tag="release-$(date -u +%Y%m%d)-${sha::7}"
+          # idempotent: re-running the promotion of the same commit on the same day keeps the tag
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "::notice::$tag already exists"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" "$sha" -m "Released to production: $IMAGE_URI" -m "digest: $DIGEST" \
+              -m "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            git push origin "refs/tags/$tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Job summary
+        if: always()
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          {
+            echo "### Release promoted: lab -> production"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`$IMAGE_URI\` |"
+            echo "| Digest (identical in both environments) | \`$DIGEST\` |"
+            echo "| Git tag | \`${TAG:-not created}\` |"
+            echo
+            echo "Rollback = run this workflow again with the previous tag (\`git tag -l 'release-*'\`)."
+          } >> "$GITHUB_STEP_SUMMARY"

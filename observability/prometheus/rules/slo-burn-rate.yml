@@ -1,0 +1,179 @@
+# Multi-window, multi-burn-rate SLO alerts - scenarios 73/76 (CONVENTIONS section 5,
+# Google SRE Workbook ch. 5). Burn rate = error ratio / error budget.
+#
+#   severity  burn   long window AND short window   for   budget spent when it fires
+#   page      14.4x  1h                5m             2m    2% of 30 days in 1 hour
+#   page      6x     6h                30m            15m   5% of 30 days in 6 hours
+#   ticket    1x     3d                6h             1h    10% of 30 days in 3 days
+#
+# The long window proves the problem is big enough to matter; the short window makes
+# the alert resolve as soon as the problem stops (nobody gets paged for an incident
+# that ended 50 minutes ago). Budgets: availability 0.005 (99.5%), latency 0.05 (95%).
+# Labels: severity (page|ticket) drives Alertmanager routing, burn (fast|slow|budget)
+# drives inhibition (a fast burn silences the slower alerts of the same SLO), drill="true"
+# marks game-day alerts that must never wake the real on-call.
+#
+# Low-traffic caveat: with very few requests one error is a big ratio. Production setups
+# add a minimum-traffic condition; the lab keeps the pure math visible.
+#
+# Unit tests: rules/tests/slo-burn-rate.test.yml  (promtool test rules ...)
+# Generated together with observability/k8s/prometheusrule-slo.yaml - change both.
+groups:
+  - name: student-app-slo-availability
+    rules:
+      - alert: SLOAvailabilityFastBurn
+        expr: |-
+          job:student_app_sli_availability_errors:ratio_rate1h > (14.4 * 0.005)
+          and
+          job:student_app_sli_availability_errors:ratio_rate5m > (14.4 * 0.005)
+        for: 2m
+        labels:
+          severity: "page"
+          slo: "availability"
+          burn: "fast"
+        annotations:
+          summary: "{{ $labels.job }}: availability error budget burning faster than 14.4x"
+          description: "{{ $value | humanizePercentage }} of requests failed (5xx) over the last 1h and the 5m window agrees. SLO 99.5% allows 0.5%; at this rate the 30-day budget is gone in about 2 days."
+          runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#sloavailabilityfastburn"
+      - alert: SLOAvailabilitySlowBurn
+        expr: |-
+          job:student_app_sli_availability_errors:ratio_rate6h > (6 * 0.005)
+          and
+          job:student_app_sli_availability_errors:ratio_rate30m > (6 * 0.005)
+        for: 15m
+        labels:
+          severity: "page"
+          slo: "availability"
+          burn: "slow"
+        annotations:
+          summary: "{{ $labels.job }}: availability error budget burning faster than 6x"
+          description: "{{ $value | humanizePercentage }} of requests failed (5xx) over the last 6h and the 30m window agrees. SLO 99.5% allows 0.5%; at this rate the 30-day budget is gone in about 5 days."
+          runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#sloavailabilityslowburn"
+      - alert: SLOAvailabilityBudgetBurn
+        expr: |-
+          job:student_app_sli_availability_errors:ratio_rate3d > (1 * 0.005)
+          and
+          job:student_app_sli_availability_errors:ratio_rate6h > (1 * 0.005)
+        for: 1h
+        labels:
+          severity: "ticket"
+          slo: "availability"
+          burn: "budget"
+        annotations:
+          summary: "{{ $labels.job }}: availability error budget burning faster than 1x"
+          description: "{{ $value | humanizePercentage }} of requests failed (5xx) over the last 3d and the 6h window agrees. SLO 99.5% allows 0.5%; at this rate the 30-day budget is gone in under 30 days."
+          runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#sloavailabilitybudgetburn"
+  - name: student-app-slo-latency
+    rules:
+      - alert: SLOLatencyFastBurn
+        expr: |-
+          (1 - job:student_app_sli_latency_good:ratio_rate1h) > (14.4 * 0.05)
+          and
+          (1 - job:student_app_sli_latency_good:ratio_rate5m) > (14.4 * 0.05)
+        for: 2m
+        labels:
+          severity: "page"
+          slo: "latency"
+          burn: "fast"
+        annotations:
+          summary: "{{ $labels.job }}: latency error budget burning faster than 14.4x"
+          description: "{{ $value | humanizePercentage }} of requests were slower than 300ms over the last 1h and the 5m window agrees. SLO: 95% under 300ms (5% budget); at this rate the 30-day budget is gone in about 2 days."
+          runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#slolatencyfastburn"
+      - alert: SLOLatencySlowBurn
+        expr: |-
+          (1 - job:student_app_sli_latency_good:ratio_rate6h) > (6 * 0.05)
+          and
+          (1 - job:student_app_sli_latency_good:ratio_rate30m) > (6 * 0.05)
+        for: 15m
+        labels:
+          severity: "page"
+          slo: "latency"
+          burn: "slow"
+        annotations:
+          summary: "{{ $labels.job }}: latency error budget burning faster than 6x"
+          description: "{{ $value | humanizePercentage }} of requests were slower than 300ms over the last 6h and the 30m window agrees. SLO: 95% under 300ms (5% budget); at this rate the 30-day budget is gone in about 5 days."
+          runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#slolatencyslowburn"
+      - alert: SLOLatencyBudgetBurn
+        expr: |-
+          (1 - job:student_app_sli_latency_good:ratio_rate3d) > (1 * 0.05)
+          and
+          (1 - job:student_app_sli_latency_good:ratio_rate6h) > (1 * 0.05)
+        for: 1h
+        labels:
+          severity: "ticket"
+          slo: "latency"
+          burn: "budget"
+        annotations:
+          summary: "{{ $labels.job }}: latency error budget burning faster than 1x"
+          description: "{{ $value | humanizePercentage }} of requests were slower than 300ms over the last 3d and the 6h window agrees. SLO: 95% under 300ms (5% budget); at this rate the 30-day budget is gone in under 30 days."
+          runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#slolatencybudgetburn"
+      - alert: SLOLatencyTailP99High
+        expr: |-
+          histogram_quantile(0.99, sum by (job, le) (rate(student_app_http_request_duration_seconds_bucket{route!~"sre-lab\\..*|up|health\\.ready|metrics"}[10m]))) > 1
+        for: 15m
+        labels:
+          severity: "ticket"
+          slo: "latency-tail"
+        annotations:
+          summary: "{{ $labels.job }}: p99 latency above 1s"
+          description: "p99 over the last 10m is {{ $value | humanizeDuration }} (SLO: p99 < 1s), for 15 minutes."
+          runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#slolatencytailp99high"
+  - name: student-app-slo-drill
+    rules:
+      - alert: SLODrillFastBurn
+        expr: |-
+          job:student_app_sli_drill_errors:ratio_rate1h > (14.4 * 0.005)
+          and
+          job:student_app_sli_drill_errors:ratio_rate5m > (14.4 * 0.005)
+        for: 2m
+        labels:
+          severity: "page"
+          slo: "availability-drill"
+          burn: "fast"
+          drill: "true"
+        annotations:
+          summary: "DRILL {{ $labels.job }}: /sre-lab/error burning the drill budget faster than 14.4x"
+          description: "{{ $value | humanizePercentage }} of /sre-lab/error requests failed over the last 1h and the 5m window agrees. Game-day traffic (loadtest/k6/error-budget-burn.js), not a user-facing incident."
+          runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#slodrillfastburn"
+      - alert: SLODrillSlowBurn
+        expr: |-
+          job:student_app_sli_drill_errors:ratio_rate6h > (6 * 0.005)
+          and
+          job:student_app_sli_drill_errors:ratio_rate30m > (6 * 0.005)
+        for: 15m
+        labels:
+          severity: "page"
+          slo: "availability-drill"
+          burn: "slow"
+          drill: "true"
+        annotations:
+          summary: "DRILL {{ $labels.job }}: /sre-lab/error burning the drill budget faster than 6x"
+          description: "{{ $value | humanizePercentage }} of /sre-lab/error requests failed over the last 6h and the 30m window agrees. Game-day traffic (loadtest/k6/error-budget-burn.js), not a user-facing incident."
+          runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#slodrillslowburn"
+      - alert: SLODrillBudgetBurn
+        expr: |-
+          job:student_app_sli_drill_errors:ratio_rate3d > (1 * 0.005)
+          and
+          job:student_app_sli_drill_errors:ratio_rate6h > (1 * 0.005)
+        for: 1h
+        labels:
+          severity: "ticket"
+          slo: "availability-drill"
+          burn: "budget"
+          drill: "true"
+        annotations:
+          summary: "DRILL {{ $labels.job }}: /sre-lab/error burning the drill budget faster than 1x"
+          description: "{{ $value | humanizePercentage }} of /sre-lab/error requests failed over the last 3d and the 6h window agrees. Game-day traffic (loadtest/k6/error-budget-burn.js), not a user-facing incident."
+          runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#slodrillbudgetburn"
+  - name: student-app-symptoms
+    rules:
+      - alert: StudentAppNoTargetsUp
+        expr: |-
+          sum by (job) (up{job="student-app"}) == 0
+        for: 2m
+        labels:
+          severity: "page"
+        annotations:
+          summary: "No student-app instance can be scraped"
+          description: "Every target of job {{ $labels.job }} has been down for 2 minutes. One absent blue/green slot is normal; all of them means an outage or a broken scrape path."
+          runbook_url: "https://github.com/Ahmed-Reda-Ragab/StudentHub/blob/master/docs/devops/scenarios/76-incident-response.md#studentappnotargetsup"

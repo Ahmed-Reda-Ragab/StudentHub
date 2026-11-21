@@ -1,0 +1,53 @@
+# kind (local + .github/workflows/k8s-integration.yml), scenarios 60, 65–68 (incl. the Rollouts drills).
+#   helm upgrade --install student-app k8s/helm/student-app -n student-app \
+#     -f k8s/helm/student-app/values-kind.yaml --set-string image.tag=ci-v1 --wait
+
+image:
+  repository: student-app
+  tag: ci-v1
+  # Images are side-loaded with `kind load docker-image`: never try a registry.
+  pullPolicy: Never
+
+config:
+  APP_URL: http://localhost:8088
+  DB_HOST: mysql            # k8s/kind/mysql.yaml (headless Service)
+
+service:
+  type: NodePort
+  nodePort: 30080           # published as localhost:8088 by k8s/kind/cluster.yaml
+
+replicaCount: 2
+
+# No metrics-server on a bare kind cluster → fixed replicas (see k8s/kind/README.md to enable).
+autoscaling:
+  enabled: false
+
+networkPolicy:
+  databaseTo:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: mysql
+
+# Off by default so the first part of the CI tests the plain Deployment; CI flips it with
+# --set rollout.enabled=true. Short steps sized for a CI runner.
+rollout:
+  enabled: false
+  strategy: canary
+  canary:
+    steps:
+      - setWeight: 50       # 1 of 2 pods (no traffic router on kind: weight = replica ratio)
+      # Soak time. A 50%-error canary is aborted ~45 s into it (2 failed 15 s measurements once
+      # Prometheus has 2 scrapes of the new pod); 2 min leaves margin on a slow runner.
+      - pause: {duration: 2m}
+    analysis:
+      enabled: true
+      startingStep: 1       # once the canary pod is Ready and taking traffic
+
+# prometheus-community/prometheus chart, release "prometheus" in namespace "monitoring",
+# annotation-based scraping every 10 s.
+analysis:
+  prometheus:
+    address: http://prometheus-server.monitoring.svc.cluster.local
+  interval: 15s
+  rateWindow: 1m
+  failureLimit: 1

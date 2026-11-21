@@ -1,0 +1,28 @@
+---
+# Entry points (include_role tasks_from=...):
+#   files   copy compose + scripts            (also used by bluegreen.yml / canary.yml)
+#   env     render app.env / mysql.env        (also used by bluegreen.yml / canary.yml)
+#   deploy  pull + migrate + recreate, only when the release changed
+#   smoke   /ready must answer "ready"
+- name: Validate the release to deploy
+  ansible.builtin.assert:
+    that:
+      - app_image | length > 0
+      - app_image is not search(':latest$')
+      - "'/' in app_image or ':' in app_image"
+    fail_msg: >-
+      Pass an immutable image, e.g. -e app_image=<acct>.dkr.ecr.<region>.amazonaws.com/student-app:<sha>
+      (':latest' is not allowed - CONVENTIONS §2).
+    quiet: true
+
+- name: Copy the compose file and deploy scripts
+  ansible.builtin.import_tasks: files.yml
+
+- name: Render the env files
+  ansible.builtin.import_tasks: env.yml
+
+- name: Deploy the release
+  ansible.builtin.import_tasks: deploy.yml
+
+- name: Smoke-check the release
+  ansible.builtin.import_tasks: smoke.yml

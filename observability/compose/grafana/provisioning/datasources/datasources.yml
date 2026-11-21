@@ -1,0 +1,35 @@
+# Provisioned datasources (Grafana reads this at start-up; edits in the UI are not kept).
+# Fixed UIDs so dashboards and links can reference them; the dashboards themselves use a
+# `datasource` variable, so they also work against any other Prometheus (EKS, AMP...).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s # = scrape interval, so $__rate_interval is computed correctly
+      prometheusType: Prometheus
+      manageAlerts: true # show the Prometheus alert rules in Grafana → Alerting
+      alertmanagerUid: alertmanager
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      maxLines: 1000
+
+  - name: Alertmanager
+    uid: alertmanager
+    type: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    jsonData:
+      implementation: prometheus
+      handleGrafanaManagedAlerts: false

@@ -1,0 +1,16 @@
+# cp terraform.tfvars.example terraform.tfvars   (terraform.tfvars is not committed)
+
+region   = "us-east-1"
+scenario = "35"
+
+# terraform -chdir=../../bootstrap output -raw codeconnections_arn
+codeconnections_arn = "arn:aws:codeconnections:us-east-1:<ACCOUNT_ID>:connection/<ID>"
+
+# enable_ci_webhook    = true   # CI on push (ci_branches) + pull requests
+# enable_image_webhook = false  # GitHub Actions already pushes images; start by hand
+# enable_gha_runner    = true   # runs-on: codebuild-student-app-gha-runner-${{ github.run_id }}-${{ github.run_attempt }}
+# gha_runner_ecr_push  = true
+
+# Optional Docker Hub credentials (SSM parameter NAMES, values never in Terraform):
+# dockerhub_username_parameter = "/student-app/ci/DOCKERHUB_USERNAME"
+# dockerhub_token_parameter    = "/student-app/ci/DOCKERHUB_TOKEN"

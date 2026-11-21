@@ -1,0 +1,181 @@
+# Observability + load-test lint (scenarios 12, 70–77). Static checks only, no cloud access:
+#   promtool check config / check rules / test rules (the burn-rate alerts are unit-tested)
+#   amtool check-config, Loki -verify-config, Alloy fmt, OTel collector validate
+#   dashboards are valid JSON and use the ${datasource} variable (no hard-coded datasource uid)
+#   docker compose config for the observability stacks
+#   k6 inspect --execution-requirements on every script (syntax, imports, options, scenarios)
+name: Observability lint
+
+on:
+  push:
+    branches: [master, main, devops-lab]
+    paths:
+      - "observability/**"
+      - "loadtest/**"
+      - ".github/workflows/observability-lint.yml"
+  pull_request:
+    paths:
+      - "observability/**"
+      - "loadtest/**"
+      - ".github/workflows/observability-lint.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: observability-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PROMETHEUS_IMAGE: prom/prometheus:v3.16.0
+  ALERTMANAGER_IMAGE: prom/alertmanager:v0.35.0
+  LOKI_IMAGE: grafana/loki:3.7.10
+  ALLOY_IMAGE: grafana/alloy:v1.22.0
+  OTELCOL_IMAGE: otel/opentelemetry-collector-contrib:0.165.0
+  K6_VERSION: "2.4.0"
+
+jobs:
+  prometheus:
+    name: promtool · amtool
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: promtool check config (also loads the rule files it references)
+        run: |
+          docker run --rm -v "$PWD/observability/prometheus:/p:ro" -w /p --entrypoint promtool \
+            "$PROMETHEUS_IMAGE" check config prometheus.yml
+
+      - name: promtool check rules
+        run: |
+          docker run --rm -v "$PWD/observability/prometheus:/p:ro" -w /p --entrypoint promtool \
+            "$PROMETHEUS_IMAGE" check rules rules/recording.yml rules/slo-burn-rate.yml
+
+      - name: promtool test rules (fast burn fires on 50% errors, healthy stays quiet, drills isolated)
+        run: |
+          docker run --rm -v "$PWD/observability/prometheus:/p:ro" -w /p --entrypoint promtool \
+            "$PROMETHEUS_IMAGE" test rules rules/tests/slo-burn-rate.test.yml
+
+      - name: Kubernetes PrometheusRule = compose rules (no drift) and valid
+        run: |
+          mkdir -p /tmp/k8s-rules
+          yq '{"groups": .spec.groups}' observability/k8s/prometheusrule-slo.yaml > /tmp/k8s-rules/rules.yml
+          docker run --rm -v /tmp/k8s-rules:/r:ro --entrypoint promtool "$PROMETHEUS_IMAGE" check rules /r/rules.yml
+          yq -o=json '.groups' observability/prometheus/rules/recording.yml > /tmp/k8s-rules/a.json
+          yq -o=json '.groups' observability/prometheus/rules/slo-burn-rate.yml > /tmp/k8s-rules/b.json
+          jq -s 'add' /tmp/k8s-rules/a.json /tmp/k8s-rules/b.json > /tmp/k8s-rules/compose.json
+          yq -o=json '.spec.groups' observability/k8s/prometheusrule-slo.yaml | jq '.' > /tmp/k8s-rules/k8s.json
+          if ! diff -u /tmp/k8s-rules/compose.json /tmp/k8s-rules/k8s.json; then
+            echo "::error file=observability/k8s/prometheusrule-slo.yaml::rules differ from observability/prometheus/rules"
+            exit 1
+          fi
+
+      - name: amtool check-config
+        run: |
+          docker run --rm -v "$PWD/observability/prometheus:/p:ro" --entrypoint amtool \
+            "$ALERTMANAGER_IMAGE" check-config /p/alertmanager.yml
+
+  configs:
+    name: Loki · Alloy · OTel · compose · dashboards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Loki -verify-config
+        run: |
+          docker run --rm -v "$PWD/observability/compose/loki:/cfg:ro" "$LOKI_IMAGE" \
+            -config.file=/cfg/config.yaml -verify-config
+
+      - name: Alloy config parses (alloy fmt)
+        run: |
+          docker run --rm -v "$PWD/observability/compose/alloy:/cfg:ro" "$ALLOY_IMAGE" \
+            fmt /cfg/config.alloy > /dev/null
+
+      - name: OTel collector configs validate
+        run: |
+          for f in collector-xray.yaml collector-jaeger.yaml; do
+            echo "::group::$f"
+            docker run --rm -e AWS_REGION=us-east-1 -v "$PWD/observability/otel:/cfg:ro" "$OTELCOL_IMAGE" \
+              validate --config="/cfg/$f"
+            echo "::endgroup::"
+          done
+
+      - name: docker compose config (external app network stubbed)
+        run: |
+          docker network create student-app_default >/dev/null 2>&1 || true
+          docker compose -f observability/compose/docker-compose.yml config -q
+          docker compose -f observability/otel/docker-compose.yml config -q
+
+      - name: JSON files parse; Grafana dashboards are provisionable
+        run: |
+          python3 - <<'PY'
+          import glob, json, sys
+
+          failed = False
+          for path in sorted(glob.glob("observability/**/*.json", recursive=True)):
+              try:
+                  doc = json.load(open(path, encoding="utf-8"))
+              except ValueError as e:
+                  print(f"::error file={path}::invalid JSON: {e}")
+                  failed = True
+                  continue
+              if "/grafana/dashboards/" not in path.replace("\\", "/"):
+                  print(f"ok   {path}")
+                  continue
+              problems = []
+              if not doc.get("uid") or not doc.get("title"):
+                  problems.append("missing uid/title")
+              names = [v.get("name") for v in doc.get("templating", {}).get("list", [])]
+              if "datasource" not in names:
+                  problems.append("no `datasource` template variable")
+              ids = [p.get("id") for p in doc.get("panels", [])]
+              if len(ids) != len(set(ids)):
+                  problems.append("duplicate panel ids")
+
+              def walk(node):
+                  if isinstance(node, dict):
+                      ds = node.get("datasource")
+                      if isinstance(ds, dict) and ds.get("uid") not in ("${datasource}", "-- Grafana --"):
+                          problems.append(f"hard-coded datasource uid {ds.get('uid')!r}")
+                      for v in node.values():
+                          walk(v)
+                  elif isinstance(node, list):
+                      for v in node:
+                          walk(v)
+
+              walk(doc.get("panels", []))
+              if problems:
+                  failed = True
+                  for p in sorted(set(problems)):
+                      print(f"::error file={path}::{p}")
+              else:
+                  print(f"ok   {path} ({len(ids)} panels)")
+          sys.exit(1 if failed else 0)
+          PY
+
+  k6:
+    name: k6 inspect
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: grafana/setup-k6-action@v1
+        with:
+          k6-version: ${{ env.K6_VERSION }}
+      - name: k6 inspect every script (init code + options + scenario plan)
+        run: |
+          k6 version
+          status=0
+          for f in loadtest/k6/*.js; do
+            echo "::group::$f"
+            if ! k6 inspect --execution-requirements "$f" > /dev/null; then
+              echo "::error file=$f::k6 inspect failed"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"

@@ -1,0 +1,41 @@
+# OpenTelemetry Collector → Jaeger (local alternative to X-Ray, no AWS account needed).
+# Used by docker-compose.yml in this folder. Jaeger v2 accepts OTLP natively, so the
+# collector just forwards; it is still worth having one in the path (batching, memory
+# limit, one place to add sampling / attribute scrubbing / a second backend later).
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  batch:
+    timeout: 2s
+
+exporters:
+  # `otlp_grpc` is the current name of the OTLP/gRPC exporter (`otlp` is the deprecated alias).
+  otlp_grpc/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/jaeger, debug]

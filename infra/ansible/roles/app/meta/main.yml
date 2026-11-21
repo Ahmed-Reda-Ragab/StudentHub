@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  author: Ahmed Reda
+  description: Deploys a CI-built student-app image with docker-compose.prod.yml and the deploy/ec2 scripts (Recreate strategy)
+  company: StudentHub DevOps lab
+  license: MIT
+  min_ansible_version: "2.20"
+  platforms:
+    - name: Amazon Linux
+      versions:
+        - "2023"
+  galaxy_tags:
+    - deployment
+    - laravel
+    - docker
+dependencies: []

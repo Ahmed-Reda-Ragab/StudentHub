@@ -1,0 +1,12 @@
+---
+# Daily logical backup of the MySQL *container* to S3 (scenario 27, stack 20 only - RDS has
+# automated backups + PITR). Retention is the bucket's lifecycle rule, not this role.
+mysql_backup_app_dir: "{{ app_dir | default('/opt/student-app') }}"
+mysql_backup_repo_root: "{{ repo_root | default(playbook_dir ~ '/../../..') }}"
+mysql_backup_bucket: "{{ backup_bucket | default('') }}"   # terraform output -raw backup_bucket
+mysql_backup_db_name: student_app
+mysql_backup_aws_region: "{{ aws_region | default('us-east-1') }}"
+
+# systemd calendar spec with an explicit zone: correct even if the host clock zone changes.
+mysql_backup_on_calendar: "*-*-* 03:00:00 Africa/Cairo"
+mysql_backup_unit: student-app-mysql-backup

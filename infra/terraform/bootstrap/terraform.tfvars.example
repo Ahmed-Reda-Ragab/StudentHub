@@ -1,0 +1,17 @@
+# cp terraform.tfvars.example terraform.tfvars   (terraform.tfvars is not committed)
+
+region      = "us-east-1"
+github_repo = "Ahmed-Reda-Ragab/StudentHub"
+
+# Who may assume which role (OIDC `sub` claim). Add your working branch to plan/deploy from it.
+# ci_branches            = ["main", "master"]
+# deploy_branches        = ["main", "master"]
+# deploy_environments    = ["lab", "production"]
+# terraform_branches     = ["main", "master"]
+# terraform_environments = ["lab"]
+
+# The account already has a GitHub OIDC provider (e.g. from another project)?
+# create_github_oidc_provider = false
+
+# create_codeconnection = true
+# ecr_force_delete      = false   # true only when tearing the whole lab down

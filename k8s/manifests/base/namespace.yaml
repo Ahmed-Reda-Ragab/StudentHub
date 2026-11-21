@@ -1,0 +1,14 @@
+# Namespace with the Pod Security Standard "restricted" enforced (scenario 60).
+# The API server rejects any pod in this namespace that runs as root, allows privilege
+# escalation, keeps Linux capabilities or has no seccomp profile — the app, the migration
+# Job and the lab MySQL (k8s/kind/mysql.yaml) are all written to pass it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: student-app
+  labels:
+    app.kubernetes.io/part-of: student-app-lab
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
